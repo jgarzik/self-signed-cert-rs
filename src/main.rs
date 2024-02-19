@@ -22,11 +22,17 @@ use openssl::{
     rsa::Rsa,
     x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509},
 };
-use std::fs;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
+    /// Output directory for PEM files
+    #[arg(short, long, default_value = ".")]
+    out_dir: String,
+
     /// root CA private key output path
     #[arg(long, default_value = "ca-key.pem")]
     ca_key_out: String,
@@ -318,10 +324,21 @@ fn sign_server_csr(
     Ok(builder.build())
 }
 
-fn main() -> Result<(), ErrorStack> {
+/// Writes PEM-formatted content to a file within a specified directory.
+fn write_pem_file(base_path: &Path, filename: &str, contents: &[u8]) -> Result<(), std::io::Error> {
+    if filename.is_empty() {
+        return Ok(());
+    }
+    let path = base_path.join(filename);
+    let mut file = File::create(&path)?;
+    file.write_all(contents)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parse command line arguments
     let mut args = Args::parse();
     swizzle_args(&mut args);
+    let basepath = Path::new(&args.out_dir);
 
     // Generate root CA key and certificate (Steps 1 & 2)
     let ca_key = generate_rsa_private_key()?;
@@ -334,35 +351,25 @@ fn main() -> Result<(), ErrorStack> {
     // Sign the server CSR with the root CA (Step 5)
     let server_cert = sign_server_csr(&args, &server_csr, &ca_cert, &ca_key)?;
 
-    // Output root CA private key PEM
-    if !args.ca_key_out.is_empty() {
-        let pem = ca_key.private_key_to_pem_pkcs8()?;
-        fs::write(args.ca_key_out, pem).expect("I/O error");
-    }
+    write_pem_file(
+        &basepath,
+        &args.ca_key_out,
+        &ca_key.private_key_to_pem_pkcs8()?,
+    )?;
 
-    // Output root CA certificate
-    if !args.ca_cert_out.is_empty() {
-        let pem = ca_cert.to_pem()?;
-        fs::write(args.ca_cert_out, pem).expect("I/O error");
-    }
+    write_pem_file(&basepath, &args.ca_cert_out, &ca_cert.to_pem()?)?;
 
-    // Output web server private key
-    if !args.key_out.is_empty() {
-        let pem = server_key.private_key_to_pem_pkcs8()?;
-        fs::write(args.key_out, pem).expect("I/O error");
-    }
+    write_pem_file(
+        &basepath,
+        &args.key_out,
+        &server_key.private_key_to_pem_pkcs8()?,
+    )?;
 
-    // Output web server CSR
     if args.csr_out.is_some() {
-        let pem = server_csr.to_pem()?;
-        fs::write(args.csr_out.unwrap(), pem).expect("I/O error");
+        write_pem_file(&basepath, &args.csr_out.unwrap(), &server_csr.to_pem()?)?;
     }
 
-    // Output final, self-signed web server certificate
-    if !args.cert_out.is_empty() {
-        let pem = server_cert.to_pem()?;
-        fs::write(args.cert_out, pem).expect("I/O error");
-    }
+    write_pem_file(&basepath, &args.cert_out, &server_cert.to_pem()?)?;
 
     Ok(())
 }
