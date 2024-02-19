@@ -76,6 +76,23 @@ fn create_root_ca_certificate(pkey: &PKey<Private>) -> Result<X509, ErrorStack> 
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
+    // Extension: subjectKeyIdentifier
+    builder.append_extension(
+        openssl::x509::extension::SubjectKeyIdentifier::new()
+            .build(&builder.x509v3_context(None, None))?,
+    )?;
+
+    // Extension: authorityKeyIdentifier
+    builder.append_extension(
+        openssl::x509::extension::AuthorityKeyIdentifier::new()
+            .keyid(true)
+            .build(&builder.x509v3_context(None, None))?,
+    )?;
+
+    // Extension: basicConstraints
+    let ext_basic = openssl::x509::extension::BasicConstraints::new().build()?;
+    builder.append_extension(ext_basic)?;
+
     // Generate a serial number for the certificate.
     let mut serial = BigNum::new().unwrap();
     serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
@@ -128,8 +145,39 @@ fn sign_server_csr(
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
-    // Here, add extensions such as KeyUsage, ExtendedKeyUsage, SubjectAlternativeName, etc.
-    // For simplicity, this example omits the detailed extension setup.
+    // FIXME vvv - Extension: authorityKeyIdentifier
+    //    builder.append_extension(
+    //        openssl::x509::extension::AuthorityKeyIdentifier::new()
+    //            .keyid(true)
+    //            .build(&builder.x509v3_context(None, None))?,
+    //    )?;
+
+    // Extension: basicConstraints
+    let ext_basic = openssl::x509::extension::BasicConstraints::new().build()?;
+    builder.append_extension(ext_basic)?;
+
+    // Extension: keyUsage
+    builder.append_extension(
+        openssl::x509::extension::KeyUsage::new()
+            .critical()
+            .key_cert_sign()
+            .crl_sign()
+            .build()?,
+    )?;
+
+    // Extension: subjectAltName
+    builder.append_extension(
+        openssl::x509::extension::SubjectAlternativeName::new()
+            .ip("127.0.0.1")
+            .dns("localhost")
+            .build(&builder.x509v3_context(None, None))?,
+    )?;
+
+    // Extension: subjectKeyIdentifier
+    builder.append_extension(
+        openssl::x509::extension::SubjectKeyIdentifier::new()
+            .build(&builder.x509v3_context(None, None))?,
+    )?;
 
     // Sign the certificate with the CA's private key
     builder.sign(&ca_pkey, openssl::hash::MessageDigest::sha256())?;
