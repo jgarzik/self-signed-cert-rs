@@ -10,4 +10,5 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 openssl = "0.10"

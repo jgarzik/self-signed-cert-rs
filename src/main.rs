@@ -1,19 +1,40 @@
+//
+// src/main.rs -- Generate self-signed root CA, web servers certs and keys
+//
+// Copyright (c) 2024 Jeff Garzik
+//
+// This file is part of the pcgtoolssoftware project covered under
+// the MIT License.  For the full license text, please see the LICENSE
+// file in the root directory of this project.
+// SPDX-License-Identifier: MIT
+
+extern crate clap;
 extern crate openssl;
 
+use clap::Parser;
 use openssl::asn1::Asn1Time;
 use openssl::bn::{BigNum, MsbOption};
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
-use openssl::x509::{X509, X509NameBuilder, X509Builder};
+use openssl::x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509};
 
-fn generate_root_ca() -> Result<(PKey<Private>, X509), ErrorStack> {
-    // Step 1: Generate a new RSA private key
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Display generated certs and keys
+    #[arg(short, long, default_value_t = false)]
+    display: bool,
+}
+
+fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
     let rsa = Rsa::generate(2048)?;
     let pkey = PKey::from_rsa(rsa)?;
+    Ok(pkey)
+}
 
-    // Step 2: Generate a root CA x509 certificate
+fn create_root_ca_certificate(pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", "US")?;
     name_builder.append_entry_by_text("ST", "Florida")?;
@@ -21,39 +42,93 @@ fn generate_root_ca() -> Result<(PKey<Private>, X509), ErrorStack> {
     name_builder.append_entry_by_text("CN", "127.0.0.1")?;
     let name = name_builder.build();
 
-    let mut x509_builder = X509Builder::new()?;
-    x509_builder.set_version(2)?;
-    x509_builder.set_subject_name(&name)?;
-    x509_builder.set_issuer_name(&name)?;
-    x509_builder.set_pubkey(&pkey)?;
+    let mut builder = X509Builder::new()?;
+    builder.set_version(2)?;
+    builder.set_subject_name(&name)?;
+    builder.set_issuer_name(&name)?;
+    builder.set_pubkey(pkey)?;
 
     let not_before = Asn1Time::days_from_now(0)?;
-    let not_after = Asn1Time::days_from_now(365)?; // Valid for 1 year
-    x509_builder.set_not_before(&not_before)?;
-    x509_builder.set_not_after(&not_after)?;
+    let not_after = Asn1Time::days_from_now(365)?; // Certificate valid for 1 year
+    builder.set_not_before(&not_before)?;
+    builder.set_not_after(&not_after)?;
 
-    let mut serial_number = BigNum::new().expect("BN::new err");
-    serial_number.rand(159, MsbOption::MAYBE_ZERO, false)?;
-    let asn1_serial_number = serial_number.to_asn1_integer()?;
-    x509_builder.set_serial_number(&asn1_serial_number)?;
+    // Generate a serial number for the certificate.
+    let mut serial = BigNum::new().unwrap();
+    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
+    builder
+        .set_serial_number(&serial.to_asn1_integer().unwrap())
+        .unwrap();
 
-    x509_builder.sign(&pkey, MessageDigest::sha256())?;
-    let certificate = x509_builder.build();
+    builder.sign(pkey, MessageDigest::sha256())?;
+    let certificate = builder.build();
 
-    Ok((pkey, certificate))
+    Ok(certificate)
 }
 
-fn main() {
-    match generate_root_ca() {
-        Ok((pkey, certificate)) => {
-            println!("Root CA Private Key and Certificate Generated Successfully.");
+fn generate_web_server_csr(server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+    let mut req_builder = X509ReqBuilder::new()?;
+    req_builder.set_pubkey(server_key)?;
 
-            // Saving or printing the key and certificate can be done here
-            // For demonstration, we'll print the PEM encoded certificate
-            println!("{}", String::from_utf8(certificate.to_pem().unwrap()).unwrap());
-            // Note: In a real application, you should handle errors (e.g., unwrap) more gracefully
-        },
-        Err(e) => eprintln!("Failed to generate root CA: {}", e),
+    let mut name_builder = X509NameBuilder::new()?;
+    name_builder.append_entry_by_text("C", "US")?;
+    name_builder.append_entry_by_text("ST", "Florida")?;
+    name_builder.append_entry_by_text("L", "Miami")?;
+    name_builder.append_entry_by_text("CN", "127.0.0.1")?;
+    let name = name_builder.build();
+
+    req_builder.set_subject_name(&name)?;
+
+    // Sign the CSR with the server's private key
+    req_builder.sign(server_key, MessageDigest::sha256())?;
+
+    let csr = req_builder.build();
+    Ok(csr)
+}
+
+fn main() -> Result<(), ErrorStack> {
+    // parse command line arguments
+    let args = Args::parse();
+
+    let root_pkey = generate_rsa_private_key()?;
+    let root_pem = root_pkey.private_key_to_pem_pkcs8()?;
+
+    if args.display {
+        println!(
+            "Root CA private key generated successfully.\n{}",
+            String::from_utf8(root_pem).unwrap()
+        );
     }
-}
 
+    let root_cert = create_root_ca_certificate(&root_pkey)?;
+
+    if args.display {
+        println!("Root CA Certificate Generated Successfully.");
+        println!(
+            "{}",
+            String::from_utf8(root_cert.to_pem().unwrap()).unwrap()
+        );
+    }
+
+    let server_pkey = generate_rsa_private_key()?;
+    let server_pem = server_pkey.private_key_to_pem_pkcs8()?;
+
+    if args.display {
+        println!(
+            "Server private key generated successfully.\n{}",
+            String::from_utf8(server_pem).unwrap()
+        );
+    }
+
+    let server_csr = generate_web_server_csr(&server_pkey)?;
+    let server_csr_pem = server_csr.to_pem()?;
+
+    if args.display {
+        println!(
+            "Server CSR generated successfully.\n{}",
+            String::from_utf8(server_csr_pem).unwrap()
+        );
+    }
+
+    Ok(())
+}
