@@ -24,24 +24,19 @@ use openssl::{
 };
 use std::fs;
 
-const DEF_CA_KEY: &str = "ca-key.pem";
-const DEF_CA_CERT: &str = "ca-cert.pem";
-const DEF_SVR_KEY: &str = "server-key.pem";
-const DEF_SVR_CERT: &str = "server-cert.pem";
-
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
     /// root CA private key output path
-    #[arg(long, default_value = DEF_CA_KEY)]
+    #[arg(long, default_value = "ca-key.pem")]
     ca_key: String,
 
     /// root CA cert output path
-    #[arg(long, default_value = DEF_CA_CERT)]
+    #[arg(long, default_value = "ca-cert.pem")]
     ca_cert: String,
 
     /// server private key output path
-    #[arg(long, default_value = DEF_SVR_KEY)]
+    #[arg(long, default_value = "server-key.pem")]
     key: String,
 
     /// server cert signing request output path
@@ -49,7 +44,7 @@ struct Args {
     csr: Option<String>,
 
     /// server cert output path
-    #[arg(long, default_value = DEF_SVR_CERT)]
+    #[arg(long, default_value = "server-cert.pem")]
     cert: String,
 }
 
