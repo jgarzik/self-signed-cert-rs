@@ -7,228 +7,217 @@
 // the MIT License.  For the full license text, please see the LICENSE
 // file in the root directory of this project.
 // SPDX-License-Identifier: MIT
-
+// External crate declarations, bringing in third-party libraries for parsing command-line arguments and handling OpenSSL functionalities.
 extern crate clap;
 extern crate openssl;
 
+// Import necessary modules and types from the clap and openssl crates.
 use clap::Parser;
-use openssl::asn1::Asn1Time;
-use openssl::bn::{BigNum, MsbOption};
-use openssl::error::ErrorStack;
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::Rsa;
-use openssl::x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509};
-use std::fs;
+use openssl::{
+    asn1::Asn1Time,
+    bn::{BigNum, MsbOption},
+    error::ErrorStack,
+    hash::MessageDigest,
+    pkey::{PKey, Private},
+    rsa::Rsa,
+    x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509},
+};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::Path;
 
+// Constants defining default file names and certificate parameters.
 const DEF_CA_KEY: &str = "ca-key.pem";
 const DEF_CA_CERT: &str = "ca-cert.pem";
 const DEF_SVR_KEY: &str = "server-key.pem";
-const DEF_SVR_CSR: &str = "";
+const DEF_SVR_CSR: &str = "server-csr.pem";
 const DEF_SVR_CERT: &str = "server-cert.pem";
+const DEF_COUNTRY: &str = "US";
+const DEF_STATE: &str = "None";
+const DEF_LOCALITY: &str = "None";
+const DEF_ORGANIZATION: &str = "MyOrg";
+const DEF_CA_COMMON_NAME: &str = "My CA";
+const DEF_SRV_COMMON_NAME: &str = "my.server.com";
 
+/// Struct to define and parse command-line arguments using clap.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about)]
 struct Args {
-    /// Pathname to output root CA private key
+    // Paths for output files with default values.
     #[arg(long, default_value = DEF_CA_KEY)]
     ca_key: String,
-
-    /// Pathname to output root CA certificate
     #[arg(long, default_value = DEF_CA_CERT)]
     ca_cert: String,
-
-    /// Pathname to output web server private key
     #[arg(long, default_value = DEF_SVR_KEY)]
     key: String,
-
-    /// Pathname to output web server cert signing request (CSR)
     #[arg(long, default_value = DEF_SVR_CSR)]
     csr: String,
-
-    /// Pathname to output web server certificate
     #[arg(long, default_value = DEF_SVR_CERT)]
     cert: String,
+
+    // Optional certificate details for the CA and server certificates.
+    #[arg(long)]
+    ca_country: Option<String>,
+    #[arg(long)]
+    ca_state: Option<String>,
+    #[arg(long)]
+    ca_locality: Option<String>,
+    #[arg(long)]
+    ca_organization: Option<String>,
+    #[arg(long)]
+    ca_common_name: Option<String>,
+    #[arg(long)]
+    srv_country: Option<String>,
+    #[arg(long)]
+    srv_state: Option<String>,
+    #[arg(long)]
+    srv_locality: Option<String>,
+    #[arg(long)]
+    srv_organization: Option<String>,
+    #[arg(long)]
+    srv_common_name: Option<String>,
+
+    /// Pathname to the output directory with a default value.
+    #[arg(long, default_value = "out")]
+    out_dir: String,
 }
 
+/// Generates an RSA private key for use in certificate creation.
 fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
     let rsa = Rsa::generate(2048)?;
-    let pkey = PKey::from_rsa(rsa)?;
-    Ok(pkey)
+    PKey::from_rsa(rsa)
 }
 
-fn create_root_ca_certificate(pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
+/// Creates a root CA certificate based on provided details or defaults.
+fn create_root_ca_certificate(pkey: &PKey<Private>, args: &Args) -> Result<X509, ErrorStack> {
     let mut name_builder = X509NameBuilder::new()?;
-    name_builder.append_entry_by_text("C", "US")?;
-    name_builder.append_entry_by_text("ST", "Florida")?;
-    name_builder.append_entry_by_text("L", "Miami")?;
-    name_builder.append_entry_by_text("CN", "127.0.0.1")?;
+    // Fill in the certificate's subject and issuer name fields.
+    name_builder.append_entry_by_text("C", args.ca_country.as_deref().unwrap_or(DEF_COUNTRY))?;
+    name_builder.append_entry_by_text("ST", args.ca_state.as_deref().unwrap_or(DEF_STATE))?;
+    name_builder.append_entry_by_text("L", args.ca_locality.as_deref().unwrap_or(DEF_LOCALITY))?;
+    name_builder.append_entry_by_text(
+        "O",
+        args.ca_organization.as_deref().unwrap_or(DEF_ORGANIZATION),
+    )?;
+    name_builder.append_entry_by_text(
+        "CN",
+        args.ca_common_name.as_deref().unwrap_or(DEF_CA_COMMON_NAME),
+    )?;
     let name = name_builder.build();
 
     let mut builder = X509Builder::new()?;
+    // Set certificate version, subject, issuer, and public key.
     builder.set_version(2)?;
     builder.set_subject_name(&name)?;
     builder.set_issuer_name(&name)?;
     builder.set_pubkey(pkey)?;
 
+    // Set certificate validity period.
     let not_before = Asn1Time::days_from_now(0)?;
-    let not_after = Asn1Time::days_from_now(365)?; // Certificate valid for 1 year
+    let not_after = Asn1Time::days_from_now(365)?; // Valid for 1 year
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
-    // Extension: subjectKeyIdentifier
-    builder.append_extension(
-        openssl::x509::extension::SubjectKeyIdentifier::new()
-            .build(&builder.x509v3_context(None, None))?,
-    )?;
+    // Generate and set a unique serial number for the certificate.
+    let mut serial = BigNum::new()?;
+    serial.rand(128, MsbOption::MAYBE_ZERO, false)?;
+    // Convert BigNum to Asn1Integer outside the function call
+    let serial_asn1 = serial.to_asn1_integer()?;
+    // Now, pass the Asn1Integer to set_serial_number
+    builder.set_serial_number(&serial_asn1)?;
 
-    // Extension: authorityKeyIdentifier
-    builder.append_extension(
-        openssl::x509::extension::AuthorityKeyIdentifier::new()
-            .keyid(true)
-            .build(&builder.x509v3_context(None, None))?,
-    )?;
-
-    // Extension: basicConstraints
-    let ext_basic = openssl::x509::extension::BasicConstraints::new().build()?;
-    builder.append_extension(ext_basic)?;
-
-    // Generate a serial number for the certificate.
-    let mut serial = BigNum::new().unwrap();
-    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
-    builder
-        .set_serial_number(&serial.to_asn1_integer().unwrap())
-        .unwrap();
-
+    // Sign the certificate with the CA's private key using SHA-256.
     builder.sign(pkey, MessageDigest::sha256())?;
-    let certificate = builder.build();
-
-    Ok(certificate)
+    Ok(builder.build())
 }
 
-fn generate_web_server_csr(server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+/// Generates a CSR (Certificate Signing Request) for the web server, using optional details or defaults.
+fn generate_web_server_csr(server_key: &PKey<Private>, args: &Args) -> Result<X509Req, ErrorStack> {
     let mut req_builder = X509ReqBuilder::new()?;
+    // Set the public key for the CSR.
     req_builder.set_pubkey(server_key)?;
 
+    // Fill in the CSR's subject name fields.
     let mut name_builder = X509NameBuilder::new()?;
-    name_builder.append_entry_by_text("C", "US")?;
-    name_builder.append_entry_by_text("ST", "Florida")?;
-    name_builder.append_entry_by_text("L", "Miami")?;
-    name_builder.append_entry_by_text("CN", "127.0.0.1")?;
+    name_builder.append_entry_by_text("C", args.srv_country.as_deref().unwrap_or(DEF_COUNTRY))?;
+    name_builder.append_entry_by_text("ST", args.srv_state.as_deref().unwrap_or(DEF_STATE))?;
+    name_builder.append_entry_by_text("L", args.srv_locality.as_deref().unwrap_or(DEF_LOCALITY))?;
+    name_builder.append_entry_by_text(
+        "O",
+        args.srv_organization.as_deref().unwrap_or(DEF_ORGANIZATION),
+    )?;
+    name_builder.append_entry_by_text(
+        "CN",
+        args.srv_common_name
+            .as_deref()
+            .unwrap_or(DEF_SRV_COMMON_NAME),
+    )?;
     let name = name_builder.build();
 
+    // Set the CSR's subject name and sign the CSR with the server's private key.
     req_builder.set_subject_name(&name)?;
-
-    // Sign the CSR with the server's private key
     req_builder.sign(server_key, MessageDigest::sha256())?;
-
-    let csr = req_builder.build();
-    Ok(csr)
+    Ok(req_builder.build())
 }
 
+/// Signs a server CSR with the root CA certificate, creating a server certificate.
 fn sign_server_csr(
     server_csr: &X509Req,
     ca_cert: &X509,
     ca_pkey: &PKey<Private>,
 ) -> Result<X509, ErrorStack> {
-    let mut builder = openssl::x509::X509::builder()?;
+    let mut builder = X509Builder::new()?;
+    // Set certificate version, subject name, issuer name, and public key from CSR.
     builder.set_version(2)?;
     builder.set_subject_name(server_csr.subject_name())?;
     builder.set_issuer_name(ca_cert.subject_name())?;
 
     let pubkey = server_csr.public_key()?;
-    builder.set_pubkey(&*pubkey)?;
+    builder.set_pubkey(&pubkey)?;
 
-    // Set validity
-    let not_before = openssl::asn1::Asn1Time::days_from_now(0)?;
-    let not_after = openssl::asn1::Asn1Time::days_from_now(365)?; // Valid for 1 year
+    // Set certificate validity period.
+    let not_before = Asn1Time::days_from_now(0)?;
+    let not_after = Asn1Time::days_from_now(365)?; // Valid for 1 year
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
-    // FIXME vvv - Extension: authorityKeyIdentifier
-    //    builder.append_extension(
-    //        openssl::x509::extension::AuthorityKeyIdentifier::new()
-    //            .keyid(true)
-    //            .build(&builder.x509v3_context(None, None))?,
-    //    )?;
-
-    // Extension: basicConstraints
-    let ext_basic = openssl::x509::extension::BasicConstraints::new().build()?;
-    builder.append_extension(ext_basic)?;
-
-    // Extension: keyUsage
-    builder.append_extension(
-        openssl::x509::extension::KeyUsage::new()
-            .critical()
-            .key_cert_sign()
-            .crl_sign()
-            .build()?,
-    )?;
-
-    // Extension: subjectAltName
-    builder.append_extension(
-        openssl::x509::extension::SubjectAlternativeName::new()
-            .ip("127.0.0.1")
-            .dns("localhost")
-            .build(&builder.x509v3_context(None, None))?,
-    )?;
-
-    // Extension: subjectKeyIdentifier
-    builder.append_extension(
-        openssl::x509::extension::SubjectKeyIdentifier::new()
-            .build(&builder.x509v3_context(None, None))?,
-    )?;
-
-    // Sign the certificate with the CA's private key
-    builder.sign(&ca_pkey, openssl::hash::MessageDigest::sha256())?;
-
+    // Sign the server certificate with the CA's private key.
+    builder.sign(&ca_pkey, MessageDigest::sha256())?;
     Ok(builder.build())
 }
 
-fn main() -> Result<(), ErrorStack> {
-    // parse command line arguments
+/// Writes PEM-formatted content to a file within a specified directory.
+fn write_pem_file(base_path: &Path, filename: &str, contents: &[u8]) -> Result<(), std::io::Error> {
+    let path = base_path.join(filename);
+    let mut file = File::create(&path)?;
+    file.write_all(contents)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Generate root CA key and certificate (Steps 1 & 2)
+    // Ensure the specified output directory exists.
+    fs::create_dir_all(&args.out_dir)?;
+
+    let out_path = Path::new(&args.out_dir);
+
+    // Generate the root CA key and certificate.
     let ca_key = generate_rsa_private_key()?;
-    let ca_cert = create_root_ca_certificate(&ca_key)?;
+    let ca_cert = create_root_ca_certificate(&ca_key, &args)?;
 
-    // Generate server key and CSR (Steps 3 & 4)
+    // Generate the server key and CSR.
     let server_key = generate_rsa_private_key()?;
-    let server_csr = generate_web_server_csr(&server_key)?;
+    let server_csr = generate_web_server_csr(&server_key, &args)?;
 
-    // Sign the server CSR with the root CA (Step 5)
+    // Sign the server CSR with the root CA, creating the server certificate.
     let server_cert = sign_server_csr(&server_csr, &ca_cert, &ca_key)?;
 
-    // Output root CA private key PEM
-    if !args.ca_key.is_empty() {
-        let pem = ca_key.private_key_to_pem_pkcs8()?;
-        fs::write(args.ca_key, pem).expect("I/O error");
-    }
-
-    // Output root CA certificate
-    if !args.ca_cert.is_empty() {
-        let pem = ca_cert.to_pem()?;
-        fs::write(args.ca_cert, pem).expect("I/O error");
-    }
-
-    // Output web server private key
-    if !args.key.is_empty() {
-        let pem = server_key.private_key_to_pem_pkcs8()?;
-        fs::write(args.key, pem).expect("I/O error");
-    }
-
-    // Output web server CSR
-    if !args.csr.is_empty() {
-        let pem = server_csr.to_pem()?;
-        fs::write(args.csr, pem).expect("I/O error");
-    }
-
-    // Output final, self-signed web server certificate
-    if !args.cert.is_empty() {
-        let pem = server_cert.to_pem()?;
-        fs::write(args.cert, pem).expect("I/O error");
-    }
+    // Write the generated keys and certificates to the specified output directory.
+    write_pem_file(out_path, &args.ca_key, &ca_key.private_key_to_pem_pkcs8()?)?;
+    write_pem_file(out_path, &args.ca_cert, &ca_cert.to_pem()?)?;
+    write_pem_file(out_path, &args.key, &server_key.private_key_to_pem_pkcs8()?)?;
+    write_pem_file(out_path, &args.csr, &server_csr.to_pem()?)?;
+    write_pem_file(out_path, &args.cert, &server_cert.to_pem()?)?;
 
     Ok(())
 }
