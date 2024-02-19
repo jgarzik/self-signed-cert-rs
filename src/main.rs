@@ -27,29 +27,28 @@ use std::fs;
 const DEF_CA_KEY: &str = "ca-key.pem";
 const DEF_CA_CERT: &str = "ca-cert.pem";
 const DEF_SVR_KEY: &str = "server-key.pem";
-const DEF_SVR_CSR: &str = "";
 const DEF_SVR_CERT: &str = "server-cert.pem";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about)]
 struct Args {
-    /// Pathname to output root CA private key
+    /// root CA private key output path
     #[arg(long, default_value = DEF_CA_KEY)]
     ca_key: String,
 
-    /// Pathname to output root CA certificate
+    /// root CA cert output path
     #[arg(long, default_value = DEF_CA_CERT)]
     ca_cert: String,
 
-    /// Pathname to output web server private key
+    /// server private key output path
     #[arg(long, default_value = DEF_SVR_KEY)]
     key: String,
 
-    /// Pathname to output web server cert signing request (CSR)
-    #[arg(long, default_value = DEF_SVR_CSR)]
-    csr: String,
+    /// server cert signing request output path
+    #[arg(long)]
+    csr: Option<String>,
 
-    /// Pathname to output web server certificate
+    /// server cert output path
     #[arg(long, default_value = DEF_SVR_CERT)]
     cert: String,
 }
@@ -227,9 +226,9 @@ fn main() -> Result<(), ErrorStack> {
     }
 
     // Output web server CSR
-    if !args.csr.is_empty() {
+    if args.csr.is_some() {
         let pem = server_csr.to_pem()?;
-        fs::write(args.csr, pem).expect("I/O error");
+        fs::write(args.csr.unwrap(), pem).expect("I/O error");
     }
 
     // Output final, self-signed web server certificate
