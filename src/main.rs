@@ -86,6 +86,64 @@ struct Args {
     /// CA cert: organization
     #[arg(long)]
     ca_org: Option<String>,
+
+    /// common name: Default set for both CA and server certs.
+    #[arg(long)]
+    common_name: Option<String>,
+
+    /// country code: Default set for both CA and server certs.
+    #[arg(long)]
+    country: Option<String>,
+
+    /// state or province: Default set for both CA and server certs.
+    #[arg(long)]
+    state: Option<String>,
+
+    /// city or locality: Default set for both CA and server certs.
+    #[arg(long)]
+    city: Option<String>,
+
+    /// organization: Default set for both CA and server certs.
+    #[arg(long)]
+    org: Option<String>,
+}
+
+fn swizzle_args(args: &mut Args) {
+    match &args.common_name {
+        Some(txt) => {
+            args.ca_common_name = txt.clone();
+            args.srv_common_name = txt.clone();
+        }
+        None => {}
+    }
+    match &args.org {
+        Some(txt) => {
+            args.ca_org = Some(txt.clone());
+            args.srv_org = Some(txt.clone());
+        }
+        None => {}
+    }
+    match &args.country {
+        Some(txt) => {
+            args.ca_country = txt.clone();
+            args.srv_country = txt.clone();
+        }
+        None => {}
+    }
+    match &args.state {
+        Some(txt) => {
+            args.ca_state = Some(txt.clone());
+            args.srv_state = Some(txt.clone());
+        }
+        None => {}
+    }
+    match &args.city {
+        Some(txt) => {
+            args.ca_city = Some(txt.clone());
+            args.srv_city = Some(txt.clone());
+        }
+        None => {}
+    }
 }
 
 fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
@@ -262,7 +320,8 @@ fn sign_server_csr(
 
 fn main() -> Result<(), ErrorStack> {
     // parse command line arguments
-    let args = Args::parse();
+    let mut args = Args::parse();
+    swizzle_args(&mut args);
 
     // Generate root CA key and certificate (Steps 1 & 2)
     let ca_key = generate_rsa_private_key()?;
