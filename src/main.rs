@@ -11,14 +11,17 @@
 extern crate clap;
 extern crate openssl;
 
+// Import necessary modules and types from the clap and openssl crates.
 use clap::Parser;
-use openssl::asn1::Asn1Time;
-use openssl::bn::{BigNum, MsbOption};
-use openssl::error::ErrorStack;
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::Rsa;
-use openssl::x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509};
+use openssl::{
+    asn1::Asn1Time,
+    bn::{BigNum, MsbOption},
+    error::ErrorStack,
+    hash::MessageDigest,
+    pkey::{PKey, Private},
+    rsa::Rsa,
+    x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509},
+};
 use std::fs;
 
 const DEF_CA_KEY: &str = "ca-key.pem";
