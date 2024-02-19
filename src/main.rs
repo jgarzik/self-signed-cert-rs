@@ -29,23 +29,63 @@ use std::fs;
 struct Args {
     /// root CA private key output path
     #[arg(long, default_value = "ca-key.pem")]
-    ca_key: String,
+    ca_key_out: String,
 
     /// root CA cert output path
     #[arg(long, default_value = "ca-cert.pem")]
-    ca_cert: String,
+    ca_cert_out: String,
 
     /// server private key output path
     #[arg(long, default_value = "server-key.pem")]
-    key: String,
+    key_out: String,
 
     /// server cert signing request output path
     #[arg(long)]
-    csr: Option<String>,
+    csr_out: Option<String>,
 
     /// server cert output path
     #[arg(long, default_value = "server-cert.pem")]
-    cert: String,
+    cert_out: String,
+
+    /// Server cert: common name
+    #[arg(long, default_value = "127.0.0.1")]
+    srv_common_name: String,
+
+    /// Server cert: country code
+    #[arg(long, default_value = "US")]
+    srv_country: String,
+
+    /// Server cert: state or province
+    #[arg(long)]
+    srv_state: Option<String>,
+
+    /// Server cert: city or locality
+    #[arg(long)]
+    srv_city: Option<String>,
+
+    /// Server cert: organization
+    #[arg(long)]
+    srv_org: Option<String>,
+
+    /// CA cert: common name
+    #[arg(long, default_value = "127.0.0.1")]
+    ca_common_name: String,
+
+    /// CA cert: country code
+    #[arg(long, default_value = "US")]
+    ca_country: String,
+
+    /// CA cert: state or province
+    #[arg(long)]
+    ca_state: Option<String>,
+
+    /// CA cert: city or locality
+    #[arg(long)]
+    ca_city: Option<String>,
+
+    /// CA cert: organization
+    #[arg(long)]
+    ca_org: Option<String>,
 }
 
 fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
@@ -54,12 +94,28 @@ fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
     Ok(pkey)
 }
 
-fn create_root_ca_certificate(pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
+fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
     let mut name_builder = X509NameBuilder::new()?;
-    name_builder.append_entry_by_text("C", "US")?;
-    name_builder.append_entry_by_text("ST", "Florida")?;
-    name_builder.append_entry_by_text("L", "Miami")?;
-    name_builder.append_entry_by_text("CN", "127.0.0.1")?;
+    name_builder.append_entry_by_text("C", &args.ca_country)?;
+    match args.ca_state.clone() {
+        Some(txt) => {
+            name_builder.append_entry_by_text("ST", &txt)?;
+        }
+        None => {}
+    }
+    match args.ca_city.clone() {
+        Some(txt) => {
+            name_builder.append_entry_by_text("L", &txt)?;
+        }
+        None => {}
+    }
+    match args.ca_org.clone() {
+        Some(txt) => {
+            name_builder.append_entry_by_text("O", &txt)?;
+        }
+        None => {}
+    }
+    name_builder.append_entry_by_text("CN", &args.ca_common_name)?;
     let name = name_builder.build();
 
     let mut builder = X509Builder::new()?;
@@ -107,15 +163,31 @@ fn create_root_ca_certificate(pkey: &PKey<Private>) -> Result<X509, ErrorStack> 
     Ok(certificate)
 }
 
-fn generate_web_server_csr(server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
     let mut req_builder = X509ReqBuilder::new()?;
     req_builder.set_pubkey(server_key)?;
 
     let mut name_builder = X509NameBuilder::new()?;
-    name_builder.append_entry_by_text("C", "US")?;
-    name_builder.append_entry_by_text("ST", "Florida")?;
-    name_builder.append_entry_by_text("L", "Miami")?;
-    name_builder.append_entry_by_text("CN", "127.0.0.1")?;
+    name_builder.append_entry_by_text("C", &args.srv_country)?;
+    match args.srv_state.clone() {
+        Some(txt) => {
+            name_builder.append_entry_by_text("ST", &txt)?;
+        }
+        None => {}
+    }
+    match args.srv_city.clone() {
+        Some(txt) => {
+            name_builder.append_entry_by_text("L", &txt)?;
+        }
+        None => {}
+    }
+    match args.srv_org.clone() {
+        Some(txt) => {
+            name_builder.append_entry_by_text("O", &txt)?;
+        }
+        None => {}
+    }
+    name_builder.append_entry_by_text("CN", &args.srv_common_name)?;
     let name = name_builder.build();
 
     req_builder.set_subject_name(&name)?;
@@ -128,6 +200,7 @@ fn generate_web_server_csr(server_key: &PKey<Private>) -> Result<X509Req, ErrorS
 }
 
 fn sign_server_csr(
+    args: &Args,
     server_csr: &X509Req,
     ca_cert: &X509,
     ca_pkey: &PKey<Private>,
@@ -171,7 +244,7 @@ fn sign_server_csr(
     // Extension: subjectAltName
     builder.append_extension(
         openssl::x509::extension::SubjectAlternativeName::new()
-            .dns("127.0.0.1")
+            .dns(&args.srv_common_name)
             .build(&builder.x509v3_context(Some(ca_cert), None))?,
     )?;
 
@@ -193,43 +266,43 @@ fn main() -> Result<(), ErrorStack> {
 
     // Generate root CA key and certificate (Steps 1 & 2)
     let ca_key = generate_rsa_private_key()?;
-    let ca_cert = create_root_ca_certificate(&ca_key)?;
+    let ca_cert = create_root_ca_certificate(&args, &ca_key)?;
 
     // Generate server key and CSR (Steps 3 & 4)
     let server_key = generate_rsa_private_key()?;
-    let server_csr = generate_web_server_csr(&server_key)?;
+    let server_csr = generate_web_server_csr(&args, &server_key)?;
 
     // Sign the server CSR with the root CA (Step 5)
-    let server_cert = sign_server_csr(&server_csr, &ca_cert, &ca_key)?;
+    let server_cert = sign_server_csr(&args, &server_csr, &ca_cert, &ca_key)?;
 
     // Output root CA private key PEM
-    if !args.ca_key.is_empty() {
+    if !args.ca_key_out.is_empty() {
         let pem = ca_key.private_key_to_pem_pkcs8()?;
-        fs::write(args.ca_key, pem).expect("I/O error");
+        fs::write(args.ca_key_out, pem).expect("I/O error");
     }
 
     // Output root CA certificate
-    if !args.ca_cert.is_empty() {
+    if !args.ca_cert_out.is_empty() {
         let pem = ca_cert.to_pem()?;
-        fs::write(args.ca_cert, pem).expect("I/O error");
+        fs::write(args.ca_cert_out, pem).expect("I/O error");
     }
 
     // Output web server private key
-    if !args.key.is_empty() {
+    if !args.key_out.is_empty() {
         let pem = server_key.private_key_to_pem_pkcs8()?;
-        fs::write(args.key, pem).expect("I/O error");
+        fs::write(args.key_out, pem).expect("I/O error");
     }
 
     // Output web server CSR
-    if args.csr.is_some() {
+    if args.csr_out.is_some() {
         let pem = server_csr.to_pem()?;
-        fs::write(args.csr.unwrap(), pem).expect("I/O error");
+        fs::write(args.csr_out.unwrap(), pem).expect("I/O error");
     }
 
     // Output final, self-signed web server certificate
-    if !args.cert.is_empty() {
+    if !args.cert_out.is_empty() {
         let pem = server_cert.to_pem()?;
-        fs::write(args.cert, pem).expect("I/O error");
+        fs::write(args.cert_out, pem).expect("I/O error");
     }
 
     Ok(())
