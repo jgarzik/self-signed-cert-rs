@@ -19,13 +19,36 @@ use openssl::hash::MessageDigest;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509};
+use std::fs;
+
+const DEF_CA_KEY: &str = "ca-key.pem";
+const DEF_CA_CERT: &str = "ca-cert.pem";
+const DEF_SVR_KEY: &str = "server-key.pem";
+const DEF_SVR_CSR: &str = "";
+const DEF_SVR_CERT: &str = "server-cert.pem";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Display generated certs and keys
-    #[arg(short, long, default_value_t = false)]
-    display: bool,
+    /// Pathname to output root CA private key
+    #[arg(long, default_value = DEF_CA_KEY)]
+    ca_key: String,
+
+    /// Pathname to output root CA certificate
+    #[arg(long, default_value = DEF_CA_CERT)]
+    ca_cert: String,
+
+    /// Pathname to output web server private key
+    #[arg(long, default_value = DEF_SVR_KEY)]
+    key: String,
+
+    /// Pathname to output web server cert signing request (CSR)
+    #[arg(long, default_value = DEF_SVR_CSR)]
+    csr: String,
+
+    /// Pathname to output web server certificate
+    #[arg(long, default_value = DEF_SVR_CERT)]
+    cert: String,
 }
 
 fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
@@ -86,48 +109,77 @@ fn generate_web_server_csr(server_key: &PKey<Private>) -> Result<X509Req, ErrorS
     Ok(csr)
 }
 
+fn sign_server_csr(
+    server_csr: &X509Req,
+    ca_cert: &X509,
+    ca_pkey: &PKey<Private>,
+) -> Result<X509, ErrorStack> {
+    let mut builder = openssl::x509::X509::builder()?;
+    builder.set_version(2)?;
+    builder.set_subject_name(server_csr.subject_name())?;
+    builder.set_issuer_name(ca_cert.subject_name())?;
+
+    let pubkey = server_csr.public_key()?;
+    builder.set_pubkey(&*pubkey)?;
+
+    // Set validity
+    let not_before = openssl::asn1::Asn1Time::days_from_now(0)?;
+    let not_after = openssl::asn1::Asn1Time::days_from_now(365)?; // Valid for 1 year
+    builder.set_not_before(&not_before)?;
+    builder.set_not_after(&not_after)?;
+
+    // Here, add extensions such as KeyUsage, ExtendedKeyUsage, SubjectAlternativeName, etc.
+    // For simplicity, this example omits the detailed extension setup.
+
+    // Sign the certificate with the CA's private key
+    builder.sign(&ca_pkey, openssl::hash::MessageDigest::sha256())?;
+
+    Ok(builder.build())
+}
+
 fn main() -> Result<(), ErrorStack> {
     // parse command line arguments
     let args = Args::parse();
 
-    let root_pkey = generate_rsa_private_key()?;
-    let root_pem = root_pkey.private_key_to_pem_pkcs8()?;
+    // Generate root CA key and certificate (Steps 1 & 2)
+    let ca_key = generate_rsa_private_key()?;
+    let ca_cert = create_root_ca_certificate(&ca_key)?;
 
-    if args.display {
-        println!(
-            "Root CA private key generated successfully.\n{}",
-            String::from_utf8(root_pem).unwrap()
-        );
+    // Generate server key and CSR (Steps 3 & 4)
+    let server_key = generate_rsa_private_key()?;
+    let server_csr = generate_web_server_csr(&server_key)?;
+
+    // Sign the server CSR with the root CA (Step 5)
+    let server_cert = sign_server_csr(&server_csr, &ca_cert, &ca_key)?;
+
+    // Output root CA private key PEM
+    if !args.ca_key.is_empty() {
+        let pem = ca_key.private_key_to_pem_pkcs8()?;
+        fs::write(args.ca_key, pem).expect("I/O error");
     }
 
-    let root_cert = create_root_ca_certificate(&root_pkey)?;
-
-    if args.display {
-        println!("Root CA Certificate Generated Successfully.");
-        println!(
-            "{}",
-            String::from_utf8(root_cert.to_pem().unwrap()).unwrap()
-        );
+    // Output root CA certificate
+    if !args.ca_cert.is_empty() {
+        let pem = ca_cert.to_pem()?;
+        fs::write(args.ca_cert, pem).expect("I/O error");
     }
 
-    let server_pkey = generate_rsa_private_key()?;
-    let server_pem = server_pkey.private_key_to_pem_pkcs8()?;
-
-    if args.display {
-        println!(
-            "Server private key generated successfully.\n{}",
-            String::from_utf8(server_pem).unwrap()
-        );
+    // Output web server private key
+    if !args.key.is_empty() {
+        let pem = server_key.private_key_to_pem_pkcs8()?;
+        fs::write(args.key, pem).expect("I/O error");
     }
 
-    let server_csr = generate_web_server_csr(&server_pkey)?;
-    let server_csr_pem = server_csr.to_pem()?;
+    // Output web server CSR
+    if !args.csr.is_empty() {
+        let pem = server_csr.to_pem()?;
+        fs::write(args.csr, pem).expect("I/O error");
+    }
 
-    if args.display {
-        println!(
-            "Server CSR generated successfully.\n{}",
-            String::from_utf8(server_csr_pem).unwrap()
-        );
+    // Output final, self-signed web server certificate
+    if !args.cert.is_empty() {
+        let pem = server_cert.to_pem()?;
+        fs::write(args.cert, pem).expect("I/O error");
     }
 
     Ok(())
