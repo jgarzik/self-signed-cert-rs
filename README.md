@@ -6,7 +6,17 @@
 A command line tool to generate self-signed web server TLS certificates,
 for use in testing.
 
-## Usage
+## Example invocation
+
+```
+$ cargo run
+    Finished dev [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/self-signed-cert`
+$ ls *.pem
+ca-cert.pem	ca-key.pem	server-cert.pem	server-key.pem
+```
+
+## Command Line Interface
 
 The CLI interface is described via `--help`:
 ```
@@ -65,15 +75,5 @@ Options:
   -V, --version
           Print version
 
-```
-
-## Example invocation
-
-```
-$ cargo run
-    Finished dev [unoptimized + debuginfo] target(s) in 0.03s
-     Running `target/debug/self-signed-cert`
-$ ls *.pem
-ca-cert.pem	ca-key.pem	server-cert.pem	server-key.pem
 ```
 
