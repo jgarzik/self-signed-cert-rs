@@ -75,7 +75,7 @@ struct Args {
 
     /// Server cert: days until expiration
     #[arg(long, default_value_t = 365)]
-    srv_expire_days: u32,
+    srv_expire: u32,
 
     /// CA cert: common name
     #[arg(long, default_value = "127.0.0.1")]
@@ -99,7 +99,7 @@ struct Args {
 
     /// CA cert: days until expiration
     #[arg(long, default_value_t = 365)]
-    ca_expire_days: u32,
+    ca_expire: u32,
 
     /// common name: Default set for both CA and server certs.
     #[arg(long)]
@@ -123,7 +123,7 @@ struct Args {
 
     /// expire days:  Default set for both CA and server certs.
     #[arg(long)]
-    expire_days: Option<u32>,
+    expire: Option<u32>,
 }
 
 /// Process CLI args that assign two settings simultaneously
@@ -163,10 +163,10 @@ fn swizzle_args(args: &mut Args) {
         }
         None => {}
     }
-    match &args.expire_days {
+    match &args.expire {
         Some(val) => {
-            args.ca_expire_days = *val;
-            args.srv_expire_days = *val;
+            args.ca_expire = *val;
+            args.srv_expire = *val;
         }
         None => {}
     }
@@ -211,7 +211,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     builder.set_pubkey(pkey)?;
 
     let not_before = Asn1Time::days_from_now(0)?;
-    let not_after = Asn1Time::days_from_now(args.ca_expire_days)?;
+    let not_after = Asn1Time::days_from_now(args.ca_expire)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
@@ -303,7 +303,7 @@ fn sign_server_csr(
 
     // Set validity
     let not_before = openssl::asn1::Asn1Time::days_from_now(0)?;
-    let not_after = openssl::asn1::Asn1Time::days_from_now(args.srv_expire_days)?;
+    let not_after = openssl::asn1::Asn1Time::days_from_now(args.srv_expire)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
