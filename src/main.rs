@@ -73,6 +73,10 @@ struct Args {
     #[arg(long)]
     srv_org: Option<String>,
 
+    /// Server cert: days until expiration
+    #[arg(long, default_value_t = 365)]
+    srv_expire_days: u32,
+
     /// CA cert: common name
     #[arg(long, default_value = "127.0.0.1")]
     ca_common_name: String,
@@ -93,6 +97,10 @@ struct Args {
     #[arg(long)]
     ca_org: Option<String>,
 
+    /// CA cert: days until expiration
+    #[arg(long, default_value_t = 365)]
+    ca_expire_days: u32,
+
     /// common name: Default set for both CA and server certs.
     #[arg(long)]
     common_name: Option<String>,
@@ -112,6 +120,10 @@ struct Args {
     /// organization: Default set for both CA and server certs.
     #[arg(long)]
     org: Option<String>,
+
+    /// expire days:  Default set for both CA and server certs.
+    #[arg(long)]
+    expire_days: Option<u32>,
 }
 
 fn swizzle_args(args: &mut Args) {
@@ -147,6 +159,13 @@ fn swizzle_args(args: &mut Args) {
         Some(txt) => {
             args.ca_city = Some(txt.clone());
             args.srv_city = Some(txt.clone());
+        }
+        None => {}
+    }
+    match &args.expire_days {
+        Some(val) => {
+            args.ca_expire_days = *val;
+            args.srv_expire_days = *val;
         }
         None => {}
     }
@@ -189,7 +208,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     builder.set_pubkey(pkey)?;
 
     let not_before = Asn1Time::days_from_now(0)?;
-    let not_after = Asn1Time::days_from_now(365)?; // Certificate valid for 1 year
+    let not_after = Asn1Time::days_from_now(args.ca_expire_days)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
@@ -279,7 +298,7 @@ fn sign_server_csr(
 
     // Set validity
     let not_before = openssl::asn1::Asn1Time::days_from_now(0)?;
-    let not_after = openssl::asn1::Asn1Time::days_from_now(365)?; // Valid for 1 year
+    let not_after = openssl::asn1::Asn1Time::days_from_now(args.srv_expire_days)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
