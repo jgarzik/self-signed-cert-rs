@@ -50,7 +50,7 @@ Options:
           Server cert: city or locality
       --srv-org <SRV_ORG>
           Server cert: organization
-      --srv-expire-days <SRV_EXPIRE_DAYS>
+      --srv-expire <SRV_EXPIRE>
           Server cert: days until expiration [default: 365]
 
       --ca-common-name <CA_COMMON_NAME>
@@ -63,7 +63,7 @@ Options:
           CA cert: city or locality
       --ca-org <CA_ORG>
           CA cert: organization
-      --ca-expire-days <CA_EXPIRE_DAYS>
+      --ca-expire <CA_EXPIRE>
           CA cert: days until expiration [default: 365]
 
       --common-name <COMMON_NAME>
@@ -76,7 +76,7 @@ Options:
           city or locality: Default set for both CA and server certs
       --org <ORG>
           organization: Default set for both CA and server certs
-      --expire-days <EXPIRE_DAYS>
+      --expire <EXPIRE>
           expire days:  Default set for both CA and server certs
 
   -h, --help
