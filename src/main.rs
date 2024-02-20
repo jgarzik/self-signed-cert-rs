@@ -3,7 +3,7 @@
 //
 // Copyright (c) 2024 Jeff Garzik
 //
-// This file is part of the pcgtoolssoftware project covered under
+// This file is part of the self-signed-cert software project covered under
 // the MIT License.  For the full license text, please see the LICENSE
 // file in the root directory of this project.
 // SPDX-License-Identifier: MIT
@@ -126,6 +126,7 @@ struct Args {
     expire_days: Option<u32>,
 }
 
+/// Process CLI args that assign two settings simultaneously
 fn swizzle_args(args: &mut Args) {
     match &args.common_name {
         Some(txt) => {
@@ -171,12 +172,14 @@ fn swizzle_args(args: &mut Args) {
     }
 }
 
+/// Generate random RSA private key
 fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
     let rsa = Rsa::generate(2048)?;
     let pkey = PKey::from_rsa(rsa)?;
     Ok(pkey)
 }
 
+/// Create root CA certificate, given root CA private key
 fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.ca_country)?;
@@ -246,6 +249,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     Ok(certificate)
 }
 
+/// Generate TLS server cert signing request
 fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
     let mut req_builder = X509ReqBuilder::new()?;
     req_builder.set_pubkey(server_key)?;
@@ -282,6 +286,7 @@ fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X5
     Ok(csr)
 }
 
+/// Root CA signs TLS server's cert request, creating final server cert
 fn sign_server_csr(
     args: &Args,
     server_csr: &X509Req,
@@ -345,6 +350,7 @@ fn sign_server_csr(
 
 /// Writes PEM-formatted content to a file within a specified directory.
 fn write_pem_file(base_path: &Path, filename: &str, contents: &[u8]) -> Result<(), std::io::Error> {
+    // if user zeroed filename, do not emit
     if filename.is_empty() {
         return Ok(());
     }
@@ -370,24 +376,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sign the server CSR with the root CA (Step 5)
     let server_cert = sign_server_csr(&args, &server_csr, &ca_cert, &ca_key)?;
 
+    // Output root CA privkey PEM
     write_pem_file(
         &basepath,
         &args.ca_key_out,
         &ca_key.private_key_to_pem_pkcs8()?,
     )?;
 
+    // Output root CA cert PEM
     write_pem_file(&basepath, &args.ca_cert_out, &ca_cert.to_pem()?)?;
 
+    // Output server privkey PEM
     write_pem_file(
         &basepath,
         &args.key_out,
         &server_key.private_key_to_pem_pkcs8()?,
     )?;
 
+    // Output server CSR PEM
     if args.csr_out.is_some() {
         write_pem_file(&basepath, &args.csr_out.unwrap(), &server_csr.to_pem()?)?;
     }
 
+    // Output server cert PEM
     write_pem_file(&basepath, &args.cert_out, &server_cert.to_pem()?)?;
 
     Ok(())
