@@ -26,6 +26,9 @@ Tool to generate self-signed root CA, web server certs and keys
 Usage: self-signed-cert [OPTIONS]
 
 Options:
+  -o, --out-dir <OUT_DIR>
+          Output directory for PEM files [default: .]
+
       --ca-key-out <CA_KEY_OUT>
           root CA private key output path [default: ca-key.pem]
       --ca-cert-out <CA_CERT_OUT>
@@ -47,6 +50,8 @@ Options:
           Server cert: city or locality
       --srv-org <SRV_ORG>
           Server cert: organization
+      --srv-expire-days <SRV_EXPIRE_DAYS>
+          Server cert: days until expiration [default: 365]
 
       --ca-common-name <CA_COMMON_NAME>
           CA cert: common name [default: 127.0.0.1]
@@ -58,6 +63,8 @@ Options:
           CA cert: city or locality
       --ca-org <CA_ORG>
           CA cert: organization
+      --ca-expire-days <CA_EXPIRE_DAYS>
+          CA cert: days until expiration [default: 365]
 
       --common-name <COMMON_NAME>
           common name: Default set for both CA and server certs
@@ -69,11 +76,12 @@ Options:
           city or locality: Default set for both CA and server certs
       --org <ORG>
           organization: Default set for both CA and server certs
+      --expire-days <EXPIRE_DAYS>
+          expire days:  Default set for both CA and server certs
 
   -h, --help
           Print help
   -V, --version
           Print version
-
 ```
 
