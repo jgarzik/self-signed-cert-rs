@@ -6,6 +6,18 @@
 A command line tool to generate self-signed web server TLS certificates,
 for use in testing.
 
+## Operation
+
+`self-signed-cert` generates the four (4) files needed to test a single
+client/server scenario:
+* root CA certificate, and private key
+* server certificate, and private key
+
+Optionally, the server cert request (CSR) may also be generated.
+
+Many options exist to tweak certificate settings.  _All CLI options are
+optional_.  The program designed to do the right thing by default.
+
 ## Example invocation
 
 ```
