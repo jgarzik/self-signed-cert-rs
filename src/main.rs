@@ -126,6 +126,11 @@ struct Args {
     expire: Option<u32>,
 }
 
+struct FileOutput {
+    filename: String,
+    data: Vec<u8>,
+}
+
 /// Process CLI args that assign two settings simultaneously
 fn swizzle_args(args: &mut Args) {
     match &args.common_name {
@@ -348,15 +353,25 @@ fn sign_server_csr(
     Ok(builder.build())
 }
 
-/// Writes PEM-formatted content to a file within a specified directory.
-fn write_pem_file(base_path: &Path, filename: &str, contents: &[u8]) -> Result<(), std::io::Error> {
+fn write_outputs(outputs: &Vec<FileOutput>) -> Result<(), std::io::Error> {
+    for output in outputs {
+        let mut file = File::create(&output.filename)?;
+        file.write_all(&output.data)?;
+    }
+
+    Ok(())
+}
+
+fn push_output(outputs: &mut Vec<FileOutput>, base_path: &Path, filename: &str, contents: &[u8]) {
     // if user zeroed filename, do not emit
     if filename.is_empty() {
-        return Ok(());
+        return;
     }
-    let path = base_path.join(filename);
-    let mut file = File::create(&path)?;
-    file.write_all(contents)
+
+    outputs.push(FileOutput {
+        filename: String::from(base_path.join(filename).to_str().unwrap()),
+        data: contents.to_vec(),
+    });
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -376,30 +391,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sign the server CSR with the root CA (Step 5)
     let server_cert = sign_server_csr(&args, &server_csr, &ca_cert, &ca_key)?;
 
+    let mut outputs: Vec<FileOutput> = Vec::new();
+
     // Output root CA privkey PEM
-    write_pem_file(
+    push_output(
+        &mut outputs,
         &basepath,
         &args.ca_key_out,
         &ca_key.private_key_to_pem_pkcs8()?,
-    )?;
+    );
 
     // Output root CA cert PEM
-    write_pem_file(&basepath, &args.ca_cert_out, &ca_cert.to_pem()?)?;
+    push_output(
+        &mut outputs,
+        &basepath,
+        &args.ca_cert_out,
+        &ca_cert.to_pem()?,
+    );
 
     // Output server privkey PEM
-    write_pem_file(
+    push_output(
+        &mut outputs,
         &basepath,
         &args.key_out,
         &server_key.private_key_to_pem_pkcs8()?,
-    )?;
+    );
 
     // Output server CSR PEM
     if args.csr_out.is_some() {
-        write_pem_file(&basepath, &args.csr_out.unwrap(), &server_csr.to_pem()?)?;
+        push_output(
+            &mut outputs,
+            &basepath,
+            &args.csr_out.unwrap(),
+            &server_csr.to_pem()?,
+        );
     }
 
     // Output server cert PEM
-    write_pem_file(&basepath, &args.cert_out, &server_cert.to_pem()?)?;
+    push_output(
+        &mut outputs,
+        &basepath,
+        &args.cert_out,
+        &server_cert.to_pem()?,
+    );
+
+    write_outputs(&outputs)?;
 
     Ok(())
 }
