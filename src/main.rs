@@ -10,6 +10,7 @@
 
 extern crate clap;
 extern crate openssl;
+extern crate zip;
 
 // Import necessary modules and types from the clap and openssl crates.
 use clap::Parser;
@@ -32,6 +33,10 @@ struct Args {
     /// Output directory for PEM files
     #[arg(short, long, default_value = ".")]
     out_dir: String,
+
+    /// If present, send output to a single zipfile OUT_ZIP
+    #[arg(long)]
+    out_zip: Option<String>,
 
     /// root CA private key output path
     #[arg(long, default_value = "ca-key.pem")]
@@ -353,6 +358,26 @@ fn sign_server_csr(
     Ok(builder.build())
 }
 
+fn write_outputs_zip(
+    filename: &str,
+    outputs: &Vec<FileOutput>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(filename)?;
+    let mut zip = zip::ZipWriter::new(file);
+
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    for output in outputs {
+        zip.start_file(&output.filename, options)?;
+        zip.write(&output.data)?;
+    }
+
+    zip.finish()?;
+
+    Ok(())
+}
+
 fn write_outputs(outputs: &Vec<FileOutput>) -> Result<(), std::io::Error> {
     for output in outputs {
         let mut file = File::create(&output.filename)?;
@@ -435,7 +460,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &server_cert.to_pem()?,
     );
 
-    write_outputs(&outputs)?;
+    if args.out_zip.is_none() {
+        write_outputs(&outputs)?;
+    } else {
+        write_outputs_zip(&args.out_zip.unwrap(), &outputs)?;
+    }
 
     Ok(())
 }

@@ -12,3 +12,4 @@ readme = "README.md"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 openssl = "0.10"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }

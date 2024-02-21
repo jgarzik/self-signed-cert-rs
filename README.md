@@ -41,6 +41,9 @@ Options:
   -o, --out-dir <OUT_DIR>
           Output directory for PEM files [default: .]
 
+      --out-zip <OUT_ZIP>
+          If present, send output to a single zipfile OUT_ZIP
+
       --ca-key-out <CA_KEY_OUT>
           root CA private key output path [default: ca-key.pem]
       --ca-cert-out <CA_CERT_OUT>
