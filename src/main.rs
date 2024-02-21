@@ -23,9 +23,15 @@ use openssl::{
     rsa::Rsa,
     x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509},
 };
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+const MODE_NORMAL: u32 = 0o444;
+const MODE_KEY: u32 = 0o400;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -134,6 +140,7 @@ struct Args {
 struct FileOutput {
     filename: String,
     data: Vec<u8>,
+    is_key: bool,
 }
 
 /// Process CLI args that assign two settings simultaneously
@@ -362,14 +369,27 @@ fn write_outputs_zip(
     filename: &str,
     outputs: &Vec<FileOutput>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::create(filename)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(filename)?;
     let mut zip = zip::ZipWriter::new(file);
 
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(9))
+        .unix_permissions(MODE_NORMAL);
+    let options_key = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(9))
+        .unix_permissions(MODE_KEY);
 
     for output in outputs {
-        zip.start_file(&output.filename, options)?;
+        if output.is_key {
+            zip.start_file(&output.filename, options_key)?;
+        } else {
+            zip.start_file(&output.filename, options)?;
+        }
         zip.write(&output.data)?;
     }
 
@@ -380,14 +400,45 @@ fn write_outputs_zip(
 
 fn write_outputs(outputs: &Vec<FileOutput>) -> Result<(), std::io::Error> {
     for output in outputs {
-        let mut file = File::create(&output.filename)?;
-        file.write_all(&output.data)?;
+        #[cfg(unix)]
+        {
+            let fmode;
+            if output.is_key {
+                fmode = MODE_KEY;
+            } else {
+                fmode = MODE_NORMAL;
+            }
+
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(fmode)
+                .open(&output.filename)?;
+
+            file.write_all(&output.data)?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output.filename)?;
+
+            file.write_all(&output.data)?;
+        }
     }
 
     Ok(())
 }
 
-fn push_output(outputs: &mut Vec<FileOutput>, base_path: &Path, filename: &str, contents: &[u8]) {
+fn push_output(
+    outputs: &mut Vec<FileOutput>,
+    base_path: &Path,
+    filename: &str,
+    contents: &[u8],
+    is_key: bool,
+) {
     // if user zeroed filename, do not emit
     if filename.is_empty() {
         return;
@@ -396,6 +447,7 @@ fn push_output(outputs: &mut Vec<FileOutput>, base_path: &Path, filename: &str, 
     outputs.push(FileOutput {
         filename: String::from(base_path.join(filename).to_str().unwrap()),
         data: contents.to_vec(),
+        is_key,
     });
 }
 
@@ -424,6 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &basepath,
         &args.ca_key_out,
         &ca_key.private_key_to_pem_pkcs8()?,
+        true,
     );
 
     // Output root CA cert PEM
@@ -432,6 +485,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &basepath,
         &args.ca_cert_out,
         &ca_cert.to_pem()?,
+        false,
     );
 
     // Output server privkey PEM
@@ -440,6 +494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &basepath,
         &args.key_out,
         &server_key.private_key_to_pem_pkcs8()?,
+        true,
     );
 
     // Output server CSR PEM
@@ -449,6 +504,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &basepath,
             &args.csr_out.unwrap(),
             &server_csr.to_pem()?,
+            false,
         );
     }
 
@@ -458,6 +514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &basepath,
         &args.cert_out,
         &server_cert.to_pem()?,
+        false,
     );
 
     if args.out_zip.is_none() {
