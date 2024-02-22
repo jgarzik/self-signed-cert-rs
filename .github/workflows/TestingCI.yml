@@ -75,8 +75,8 @@ jobs:
       - run: cargo build --release --verbose
       - run: cargo run --release --verbose
       - name: Upload self-signed-cert.exe as an artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: self-signed-cert-win64-exe
-          path: target/release/self-signed-cert.exe # or target/debug/self-signed-cert.exe if you're building a debug version
+          path: target/release/self-signed-cert.exe
 
