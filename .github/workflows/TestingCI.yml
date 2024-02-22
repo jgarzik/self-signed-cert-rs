@@ -22,17 +22,16 @@ jobs:
         toolchain: stable
         profile: minimal
         override: true
-    - name: Install OpenSSL (Windows)
-      if: runner.os == 'Windows'
-      uses: msys2/setup-msys2@v2
-      with:
-        update: true
-        install: mingw-w64-x86_64-openssl
-        path-type: inherit
-    - name: Set OPENSSL_DIR for Windows
+    - name: Install and configure vcpkg (Windows)
       if: runner.os == 'Windows'
       run: |
-        echo "OPENSSL_DIR=$(cygpath -w /mingw64)" >> $GITHUB_ENV
+        git clone https://github.com/Microsoft/vcpkg.git
+        .\vcpkg\bootstrap-vcpkg.bat
+        .\vcpkg\vcpkg install openssl-windows:x64-windows
+        .\vcpkg\vcpkg install openssl:x64-windows-static
+        .\vcpkg\vcpkg integrate install
+        echo "VCPKG_ROOT=$(pwd)\vcpkg" >> $GITHUB_ENV
+        echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
     - name: Build
       run: cargo build --verbose
     - name: Run tests
