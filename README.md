@@ -10,20 +10,22 @@ for use in testing.
 
 `self-signed-cert` generates the four (4) files needed to test a single
 client/server scenario:
-* root CA certificate, and private key
-* server certificate, and private key
+1. Root CA certificate
+2. Root CA private key
+3. Server certificate
+4. Server private key
 
 Optionally, the server cert request (CSR) may also be generated.
 
 Many options exist to tweak certificate settings.  _All CLI options are
-optional_.  The program designed to do the right thing by default.
+optional_.  The program designed to do the right thing by default, with
+zero configuration.
 
 ## Example invocation
 
 ```
-$ cargo run
-    Finished dev [unoptimized + debuginfo] target(s) in 0.03s
-     Running `target/debug/self-signed-cert`
+$ self-signed-cert
+
 $ ls *.pem
 ca-cert.pem	ca-key.pem	server-cert.pem	server-key.pem
 ```
