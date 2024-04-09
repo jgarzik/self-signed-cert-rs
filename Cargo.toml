@@ -1,6 +1,6 @@
 [package]
 name = "self-signed-cert"
-version = "1.0.2"
+version = "1.0.3"
 authors = ["Jeff Garzik"]
 edition = "2021"
 description = "Tool to generate self-signed root CA, web server certs and keys"
