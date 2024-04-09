@@ -182,23 +182,14 @@ fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
 fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.ca_country)?;
-    match args.ca_state.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("ST", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.ca_state.clone() {
+        name_builder.append_entry_by_text("ST", &txt)?;
     }
-    match args.ca_city.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("L", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.ca_city.clone() {
+        name_builder.append_entry_by_text("L", &txt)?;
     }
-    match args.ca_org.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("O", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.ca_org.clone() {
+        name_builder.append_entry_by_text("O", &txt)?;
     }
     name_builder.append_entry_by_text("CN", &args.ca_common_name)?;
     let name = name_builder.build();
