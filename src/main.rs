@@ -180,6 +180,7 @@ fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
 
 /// Create root CA certificate, given root CA private key
 fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
+    // Build the subject and issuer names.
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.ca_country)?;
     if let Some(txt) = args.ca_state.clone() {
@@ -194,12 +195,14 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     name_builder.append_entry_by_text("CN", &args.ca_common_name)?;
     let name = name_builder.build();
 
+    // Build base certificate settings
     let mut builder = X509Builder::new()?;
     builder.set_version(2)?;
     builder.set_subject_name(&name)?;
     builder.set_issuer_name(&name)?;
     builder.set_pubkey(pkey)?;
 
+    // Set validity times for the certificate.
     let not_before = Asn1Time::days_from_now(0)?;
     let not_after = Asn1Time::days_from_now(args.ca_expire)?;
     builder.set_not_before(&not_before)?;
@@ -241,28 +244,21 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
 
 /// Generate TLS server cert signing request
 fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+    // Create a new certificate signing request (CSR) builder.
     let mut req_builder = X509ReqBuilder::new()?;
     req_builder.set_pubkey(server_key)?;
 
+    // Build the subject name.
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.srv_country)?;
-    match args.srv_state.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("ST", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.srv_state.clone() {
+        name_builder.append_entry_by_text("ST", &txt)?;
     }
-    match args.srv_city.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("L", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.srv_city.clone() {
+        name_builder.append_entry_by_text("L", &txt)?;
     }
-    match args.srv_org.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("O", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.srv_org.clone() {
+        name_builder.append_entry_by_text("O", &txt)?;
     }
     name_builder.append_entry_by_text("CN", &args.srv_common_name)?;
     let name = name_builder.build();
@@ -272,6 +268,7 @@ fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X5
     // Sign the CSR with the server's private key
     req_builder.sign(server_key, MessageDigest::sha256())?;
 
+    // Return the signed CSR
     let csr = req_builder.build();
     Ok(csr)
 }
