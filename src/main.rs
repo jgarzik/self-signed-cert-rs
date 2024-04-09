@@ -145,47 +145,29 @@ struct FileOutput {
 
 /// Process CLI args that assign two settings simultaneously
 fn swizzle_args(args: &mut Args) {
-    match &args.common_name {
-        Some(txt) => {
-            args.ca_common_name = txt.clone();
-            args.srv_common_name = txt.clone();
-        }
-        None => {}
+    if let Some(txt) = &args.common_name {
+        args.ca_common_name = txt.clone();
+        args.srv_common_name = txt.clone();
     }
-    match &args.org {
-        Some(txt) => {
-            args.ca_org = Some(txt.clone());
-            args.srv_org = Some(txt.clone());
-        }
-        None => {}
+    if let Some(txt) = &args.org {
+        args.ca_org = Some(txt.clone());
+        args.srv_org = Some(txt.clone());
     }
-    match &args.country {
-        Some(txt) => {
-            args.ca_country = txt.clone();
-            args.srv_country = txt.clone();
-        }
-        None => {}
+    if let Some(txt) = &args.country {
+        args.ca_country = txt.clone();
+        args.srv_country = txt.clone();
     }
-    match &args.state {
-        Some(txt) => {
-            args.ca_state = Some(txt.clone());
-            args.srv_state = Some(txt.clone());
-        }
-        None => {}
+    if let Some(txt) = &args.state {
+        args.ca_state = Some(txt.clone());
+        args.srv_state = Some(txt.clone());
     }
-    match &args.city {
-        Some(txt) => {
-            args.ca_city = Some(txt.clone());
-            args.srv_city = Some(txt.clone());
-        }
-        None => {}
+    if let Some(txt) = &args.city {
+        args.ca_city = Some(txt.clone());
+        args.srv_city = Some(txt.clone());
     }
-    match &args.expire {
-        Some(val) => {
-            args.ca_expire = *val;
-            args.srv_expire = *val;
-        }
-        None => {}
+    if let Some(val) = &args.expire {
+        args.ca_expire = *val;
+        args.srv_expire = *val;
     }
 }
 
@@ -198,35 +180,29 @@ fn generate_rsa_private_key() -> Result<PKey<Private>, ErrorStack> {
 
 /// Create root CA certificate, given root CA private key
 fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
+    // Build the subject and issuer names.
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.ca_country)?;
-    match args.ca_state.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("ST", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.ca_state.clone() {
+        name_builder.append_entry_by_text("ST", &txt)?;
     }
-    match args.ca_city.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("L", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.ca_city.clone() {
+        name_builder.append_entry_by_text("L", &txt)?;
     }
-    match args.ca_org.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("O", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.ca_org.clone() {
+        name_builder.append_entry_by_text("O", &txt)?;
     }
     name_builder.append_entry_by_text("CN", &args.ca_common_name)?;
     let name = name_builder.build();
 
+    // Build base certificate settings
     let mut builder = X509Builder::new()?;
     builder.set_version(2)?;
     builder.set_subject_name(&name)?;
     builder.set_issuer_name(&name)?;
     builder.set_pubkey(pkey)?;
 
+    // Set validity times for the certificate.
     let not_before = Asn1Time::days_from_now(0)?;
     let not_after = Asn1Time::days_from_now(args.ca_expire)?;
     builder.set_not_before(&not_before)?;
@@ -268,28 +244,21 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
 
 /// Generate TLS server cert signing request
 fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+    // Create a new certificate signing request (CSR) builder.
     let mut req_builder = X509ReqBuilder::new()?;
     req_builder.set_pubkey(server_key)?;
 
+    // Build the subject name.
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.srv_country)?;
-    match args.srv_state.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("ST", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.srv_state.clone() {
+        name_builder.append_entry_by_text("ST", &txt)?;
     }
-    match args.srv_city.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("L", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.srv_city.clone() {
+        name_builder.append_entry_by_text("L", &txt)?;
     }
-    match args.srv_org.clone() {
-        Some(txt) => {
-            name_builder.append_entry_by_text("O", &txt)?;
-        }
-        None => {}
+    if let Some(txt) = args.srv_org.clone() {
+        name_builder.append_entry_by_text("O", &txt)?;
     }
     name_builder.append_entry_by_text("CN", &args.srv_common_name)?;
     let name = name_builder.build();
@@ -299,6 +268,7 @@ fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X5
     // Sign the CSR with the server's private key
     req_builder.sign(server_key, MessageDigest::sha256())?;
 
+    // Return the signed CSR
     let csr = req_builder.build();
     Ok(csr)
 }
