@@ -145,47 +145,29 @@ struct FileOutput {
 
 /// Process CLI args that assign two settings simultaneously
 fn swizzle_args(args: &mut Args) {
-    match &args.common_name {
-        Some(txt) => {
-            args.ca_common_name = txt.clone();
-            args.srv_common_name = txt.clone();
-        }
-        None => {}
+    if let Some(txt) = &args.common_name {
+        args.ca_common_name = txt.clone();
+        args.srv_common_name = txt.clone();
     }
-    match &args.org {
-        Some(txt) => {
-            args.ca_org = Some(txt.clone());
-            args.srv_org = Some(txt.clone());
-        }
-        None => {}
+    if let Some(txt) = &args.org {
+        args.ca_org = Some(txt.clone());
+        args.srv_org = Some(txt.clone());
     }
-    match &args.country {
-        Some(txt) => {
-            args.ca_country = txt.clone();
-            args.srv_country = txt.clone();
-        }
-        None => {}
+    if let Some(txt) = &args.country {
+        args.ca_country = txt.clone();
+        args.srv_country = txt.clone();
     }
-    match &args.state {
-        Some(txt) => {
-            args.ca_state = Some(txt.clone());
-            args.srv_state = Some(txt.clone());
-        }
-        None => {}
+    if let Some(txt) = &args.state {
+        args.ca_state = Some(txt.clone());
+        args.srv_state = Some(txt.clone());
     }
-    match &args.city {
-        Some(txt) => {
-            args.ca_city = Some(txt.clone());
-            args.srv_city = Some(txt.clone());
-        }
-        None => {}
+    if let Some(txt) = &args.city {
+        args.ca_city = Some(txt.clone());
+        args.srv_city = Some(txt.clone());
     }
-    match &args.expire {
-        Some(val) => {
-            args.ca_expire = *val;
-            args.srv_expire = *val;
-        }
-        None => {}
+    if let Some(val) = &args.expire {
+        args.ca_expire = *val;
+        args.srv_expire = *val;
     }
 }
 
