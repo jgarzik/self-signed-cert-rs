@@ -330,7 +330,7 @@ fn sign_server_csr(
     )?;
 
     // Sign the certificate with the CA's private key
-    builder.sign(&ca_pkey, openssl::hash::MessageDigest::sha256())?;
+    builder.sign(ca_pkey, openssl::hash::MessageDigest::sha256())?;
 
     Ok(builder.build())
 }
@@ -360,7 +360,7 @@ fn write_outputs_zip(
         } else {
             zip.start_file(&output.filename, options)?;
         }
-        zip.write(&output.data)?;
+        zip.write_all(&output.data)?;
     }
 
     zip.finish()?;
@@ -372,12 +372,10 @@ fn write_outputs(outputs: &Vec<FileOutput>) -> Result<(), std::io::Error> {
     for output in outputs {
         #[cfg(unix)]
         {
-            let fmode;
-            if output.is_key {
-                fmode = MODE_KEY;
-            } else {
-                fmode = MODE_NORMAL;
-            }
+            let fmode = match output.is_key {
+                true => MODE_KEY,
+                false => MODE_NORMAL,
+            };
 
             let mut file = OpenOptions::new()
                 .write(true)
@@ -443,7 +441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Output root CA privkey PEM
     push_output(
         &mut outputs,
-        &basepath,
+        basepath,
         &args.ca_key_out,
         &ca_key.private_key_to_pem_pkcs8()?,
         true,
@@ -452,7 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Output root CA cert PEM
     push_output(
         &mut outputs,
-        &basepath,
+        basepath,
         &args.ca_cert_out,
         &ca_cert.to_pem()?,
         false,
@@ -461,7 +459,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Output server privkey PEM
     push_output(
         &mut outputs,
-        &basepath,
+        basepath,
         &args.key_out,
         &server_key.private_key_to_pem_pkcs8()?,
         true,
@@ -471,7 +469,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.csr_out.is_some() {
         push_output(
             &mut outputs,
-            &basepath,
+            basepath,
             &args.csr_out.unwrap(),
             &server_csr.to_pem()?,
             false,
@@ -481,7 +479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Output server cert PEM
     push_output(
         &mut outputs,
-        &basepath,
+        basepath,
         &args.cert_out,
         &server_cert.to_pem()?,
         false,
