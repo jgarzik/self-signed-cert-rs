@@ -230,11 +230,10 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     )?;
 
     // Generate a serial number for the certificate.
-    let mut serial = BigNum::new().unwrap();
-    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
-    builder
-        .set_serial_number(&serial.to_asn1_integer().unwrap())
-        .unwrap();
+    let mut serial = BigNum::new()?;
+    serial.rand(128, MsbOption::MAYBE_ZERO, false)?;
+    let serial = serial.to_asn1_integer()?;
+    builder.set_serial_number(&serial)?;
 
     builder.sign(pkey, MessageDigest::sha256())?;
     let certificate = builder.build();
