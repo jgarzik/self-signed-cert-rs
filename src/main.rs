@@ -8,10 +8,6 @@
 // file in the root directory of this project.
 // SPDX-License-Identifier: MIT
 
-extern crate clap;
-extern crate openssl;
-extern crate zip;
-
 // Import necessary modules and types from the clap and openssl crates.
 use clap::Parser;
 use openssl::{
@@ -21,7 +17,7 @@ use openssl::{
     hash::MessageDigest,
     pkey::{PKey, Private},
     rsa::Rsa,
-    x509::{X509Builder, X509NameBuilder, X509Req, X509ReqBuilder, X509},
+    x509::{X509, X509Builder, X509NameBuilder, X509Req, X509ReqBuilder},
 };
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -37,7 +33,7 @@ const MODE_KEY: u32 = 0o400;
 fn parse_rsa_bits(s: &str) -> Result<u32, String> {
     let bits: u32 = s
         .parse()
-        .map_err(|_| format!("'{}' is not a valid number", s))?;
+        .map_err(|_| format!("'{s}' is not a valid number"))?;
     match bits {
         2048 | 3072 | 4096 => Ok(bits),
         _ => Err(String::from("RSA bits must be 2048, 3072, or 4096")),
@@ -51,7 +47,7 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     out_dir: String,
 
-    /// If present, send output to a single zipfile OUT_ZIP
+    /// If present, send output to a single zipfile `OUT_ZIP`
     #[arg(long)]
     out_zip: Option<String>,
 
@@ -153,7 +149,10 @@ struct Args {
 }
 
 struct FileOutput {
+    /// Full path the file is written to on disk
     filename: String,
+    /// Bare file name, used as the entry name inside a zip archive
+    name: String,
     data: Vec<u8>,
     is_key: bool,
 }
@@ -376,20 +375,22 @@ fn write_outputs_zip(
         .open(filename)?;
     let mut zip = zip::ZipWriter::new(file);
 
-    let options = zip::write::FileOptions::default()
+    let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(9))
         .unix_permissions(MODE_NORMAL);
-    let options_key = zip::write::FileOptions::default()
+    let options_key = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(9))
         .unix_permissions(MODE_KEY);
 
     for output in outputs {
+        // Archive entries are bare file names; --out-dir applies to loose
+        // files only, and must not leak into the archive as a path prefix.
         if output.is_key {
-            zip.start_file(&output.filename, options_key)?;
+            zip.start_file(&output.name, options_key)?;
         } else {
-            zip.start_file(&output.filename, options)?;
+            zip.start_file(&output.name, options)?;
         }
         zip.write_all(&output.data)?;
     }
@@ -403,10 +404,7 @@ fn write_outputs(outputs: &Vec<FileOutput>) -> Result<(), std::io::Error> {
     for output in outputs {
         #[cfg(unix)]
         {
-            let fmode = match output.is_key {
-                true => MODE_KEY,
-                false => MODE_NORMAL,
-            };
+            let fmode = if output.is_key { MODE_KEY } else { MODE_NORMAL };
 
             let mut file = OpenOptions::new()
                 .write(true)
@@ -445,6 +443,7 @@ fn push_output(
 
     outputs.push(FileOutput {
         filename: String::from(base_path.join(filename).to_str().unwrap()),
+        name: String::from(filename),
         data: contents.to_vec(),
         is_key,
     });
@@ -497,11 +496,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Output server CSR PEM
-    if args.csr_out.is_some() {
+    if let Some(csr_out) = &args.csr_out {
         push_output(
             &mut outputs,
             basepath,
-            &args.csr_out.unwrap(),
+            csr_out,
             &server_csr.to_pem()?,
             false,
         );
@@ -516,10 +515,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         false,
     );
 
-    if args.out_zip.is_none() {
-        write_outputs(&outputs)?;
+    if let Some(out_zip) = &args.out_zip {
+        write_outputs_zip(out_zip, &outputs)?;
     } else {
-        write_outputs_zip(&args.out_zip.unwrap(), &outputs)?;
+        write_outputs(&outputs)?;
     }
 
     Ok(())

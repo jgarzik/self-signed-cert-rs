@@ -2,7 +2,8 @@
 name = "self-signed-cert"
 version = "1.0.3"
 authors = ["Jeff Garzik"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 description = "Tool to generate self-signed root CA, web server certs and keys"
 license = "MIT"
 readme = "README.md"
@@ -10,13 +11,20 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-openssl = "0.10"
-zip = { version = "0.6", default-features = false, features = ["time", "deflate"] }
+clap = { version = "4.6", features = ["derive"] }
+openssl = "0.10.81"
+zip = { version = "8", default-features = false, features = ["deflate", "time"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27"
+zip = { version = "8", default-features = false, features = ["deflate", "time"] }
 
 [profile.release]
 lto = true
 
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
