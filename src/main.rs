@@ -22,14 +22,73 @@ use openssl::{
     stack::Stack,
     x509::{X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder},
 };
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+
+/// Everything that can go wrong, with enough context to act on.
+///
+/// The previous `Box<dyn Error>` surfaced through `Termination`, which prints
+/// the Debug representation -- an `Os { code: 17, .. }` struct or a raw
+/// openssl `ErrorStack`, naming neither the step nor the file.
+#[derive(Debug)]
+enum AppError {
+    /// Contradictory or invalid command line arguments
+    Config(String),
+    /// An openssl operation failed during a named step
+    Crypto(&'static str, ErrorStack),
+    /// A file could not be written
+    Io(PathBuf, std::io::Error),
+    /// The output already exists and --force was not given
+    Exists(PathBuf),
+    /// The zip archive could not be built
+    Zip(PathBuf, zip::result::ZipError),
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::Config(msg) => write!(f, "{msg}"),
+            AppError::Crypto(step, err) => {
+                write!(f, "could not {step}: ")?;
+                match err.errors().first() {
+                    Some(first) => write!(f, "{first}"),
+                    None => write!(f, "unknown openssl failure"),
+                }
+            }
+            AppError::Io(path, err) => write!(f, "could not write {}: {err}", path.display()),
+            AppError::Exists(path) => write!(
+                f,
+                "{} already exists; pass --force to overwrite it, \
+                 or -o to write somewhere else",
+                path.display()
+            ),
+            AppError::Zip(path, err) => {
+                write!(f, "could not build archive {}: {err}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for AppError {}
+
+/// Attach a step name to an openssl failure
+trait CryptoContext<T> {
+    fn during(self, step: &'static str) -> Result<T, AppError>;
+}
+
+impl<T> CryptoContext<T> for Result<T, ErrorStack> {
+    fn during(self, step: &'static str) -> Result<T, AppError> {
+        self.map_err(|e| AppError::Crypto(step, e))
+    }
+}
 
 const MODE_NORMAL: u32 = 0o444;
 const MODE_KEY: u32 = 0o400;
@@ -90,6 +149,18 @@ struct KeyConfig {
     rsa_bits: u32,
 }
 
+impl KeyConfig {
+    /// Human-readable name for the summary
+    fn describe(&self) -> String {
+        match self.alg {
+            KeyAlg::EcdsaP256 => String::from("ECDSA P-256"),
+            KeyAlg::EcdsaP384 => String::from("ECDSA P-384"),
+            KeyAlg::Ed25519 => String::from("Ed25519"),
+            KeyAlg::Rsa => format!("RSA {} bit", self.rsa_bits),
+        }
+    }
+}
+
 /// Default RSA modulus size when `--key-alg rsa` is selected without `--rsa-bits`
 const DEFAULT_RSA_BITS: u32 = 2048;
 
@@ -115,15 +186,29 @@ struct Args {
     #[arg(long)]
     out_zip: Option<String>,
 
+    /// Overwrite existing output files instead of refusing to run
+    #[arg(long)]
+    force: bool,
+
+    /// Do not print the summary of what was generated
+    #[arg(short, long)]
+    quiet: bool,
+
     /// root CA private key output path
+    ///
+    /// Pass an empty string to suppress this file.
     #[arg(long, default_value = "ca-key.pem")]
     ca_key_out: String,
 
     /// root CA cert output path
+    ///
+    /// Pass an empty string to suppress this file.
     #[arg(long, default_value = "ca-cert.pem")]
     ca_cert_out: String,
 
     /// server private key output path
+    ///
+    /// Pass an empty string to suppress this file.
     #[arg(long, default_value = "server-key.pem")]
     key_out: String,
 
@@ -132,6 +217,8 @@ struct Args {
     csr_out: Option<String>,
 
     /// server cert output path
+    ///
+    /// Pass an empty string to suppress this file.
     #[arg(long, default_value = "server-cert.pem")]
     cert_out: String,
 
@@ -230,11 +317,19 @@ struct Args {
 
 struct FileOutput {
     /// Full path the file is written to on disk
-    filename: String,
+    path: PathBuf,
     /// Bare file name, used as the entry name inside a zip archive
     name: String,
+    /// Human-readable description, for the summary
+    label: &'static str,
     data: Vec<u8>,
     is_key: bool,
+}
+
+impl FileOutput {
+    fn mode(&self) -> u32 {
+        if self.is_key { MODE_KEY } else { MODE_NORMAL }
+    }
 }
 
 /// Process CLI args that assign two settings simultaneously
@@ -626,14 +721,9 @@ fn sign_server_csr(
     Ok(builder.build())
 }
 
-fn write_outputs_zip(
-    filename: &str,
-    outputs: &Vec<FileOutput>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(filename)?;
+fn write_outputs_zip(filename: &str, outputs: &[FileOutput], force: bool) -> Result<(), AppError> {
+    let path = PathBuf::from(filename);
+    let file = create_file(&path, MODE_NORMAL, force)?;
     let mut zip = zip::ZipWriter::new(file);
 
     let options = zip::write::SimpleFileOptions::default()
@@ -648,43 +738,54 @@ fn write_outputs_zip(
     for output in outputs {
         // Archive entries are bare file names; --out-dir applies to loose
         // files only, and must not leak into the archive as a path prefix.
-        if output.is_key {
-            zip.start_file(&output.name, options_key)?;
-        } else {
-            zip.start_file(&output.name, options)?;
-        }
-        zip.write_all(&output.data)?;
+        let entry_options = if output.is_key { options_key } else { options };
+        zip.start_file(&output.name, entry_options)
+            .map_err(|e| AppError::Zip(path.clone(), e))?;
+        zip.write_all(&output.data)
+            .map_err(|e| AppError::Io(path.clone(), e))?;
     }
 
-    zip.finish()?;
+    zip.finish().map_err(|e| AppError::Zip(path.clone(), e))?;
 
     Ok(())
 }
 
-fn write_outputs(outputs: &Vec<FileOutput>) -> Result<(), std::io::Error> {
+/// Create an output file, honouring `--force` and the requested mode.
+///
+/// Without `--force` the create is exclusive, so existing output is never
+/// clobbered.  With it, the old file is removed first: it may be mode 0400,
+/// which would make opening it for writing fail outright.
+fn create_file(path: &Path, mode: u32, force: bool) -> Result<std::fs::File, AppError> {
+    if force {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AppError::Io(path.to_path_buf(), e)),
+        }
+    }
+
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+
+    #[cfg(unix)]
+    opts.mode(mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+
+    opts.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::Exists(path.to_path_buf())
+        } else {
+            AppError::Io(path.to_path_buf(), e)
+        }
+    })
+}
+
+fn write_outputs(outputs: &[FileOutput], force: bool) -> Result<(), AppError> {
     for output in outputs {
-        #[cfg(unix)]
-        {
-            let fmode = if output.is_key { MODE_KEY } else { MODE_NORMAL };
-
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(fmode)
-                .open(&output.filename)?;
-
-            file.write_all(&output.data)?;
-        }
-
-        #[cfg(not(unix))]
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&output.filename)?;
-
-            file.write_all(&output.data)?;
-        }
+        let mut file = create_file(&output.path, output.mode(), force)?;
+        file.write_all(&output.data)
+            .map_err(|e| AppError::Io(output.path.clone(), e))?;
     }
 
     Ok(())
@@ -694,6 +795,7 @@ fn push_output(
     outputs: &mut Vec<FileOutput>,
     base_path: &Path,
     filename: &str,
+    label: &'static str,
     contents: &[u8],
     is_key: bool,
 ) {
@@ -703,32 +805,82 @@ fn push_output(
     }
 
     outputs.push(FileOutput {
-        filename: String::from(base_path.join(filename).to_str().unwrap()),
+        path: base_path.join(filename),
         name: String::from(filename),
+        label,
         data: contents.to_vec(),
         is_key,
     });
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Report what was generated, and where.
+///
+/// Silence is a poor result for a tool whose whole job is to produce files:
+/// it leaves the user to work out what the defaults were.
+fn print_summary(
+    outputs: &[FileOutput],
+    key_cfg: &KeyConfig,
+    identity: &Identity,
+    ca_cert: &X509,
+    server_cert: &X509,
+    out_dir: &Path,
+    out_zip: Option<&str>,
+) {
+    if let Some(zip_path) = out_zip {
+        println!("wrote {zip_path} containing {} files:", outputs.len());
+    } else {
+        println!("wrote {} files to {}:", outputs.len(), out_dir.display());
+    }
+
+    let width = outputs.iter().map(|o| o.name.len()).max().unwrap_or(0);
+    for output in outputs {
+        println!(
+            "  {:<width$}  {:04o}  {}",
+            output.name,
+            output.mode(),
+            output.label,
+            width = width
+        );
+    }
+
+    let names: Vec<String> = identity
+        .sans
+        .iter()
+        .map(|entry| match entry {
+            SanEntry::Dns(name) => format!("DNS:{name}"),
+            SanEntry::Ip(ip) => format!("IP:{ip}"),
+        })
+        .collect();
+
+    println!();
+    println!("  key algorithm  {}", key_cfg.describe());
+    println!("  server names   {}", names.join(", "));
+    println!("  server cert    expires {}", server_cert.not_after());
+    println!("  root CA        expires {}", ca_cert.not_after());
+}
+
+fn run() -> Result<(), AppError> {
     // parse command line arguments
     let mut args = Args::parse();
     swizzle_args(&mut args);
     warn_about_validity(&args);
-    let key_cfg = resolve_key_config(&args)?;
+    let key_cfg = resolve_key_config(&args).map_err(AppError::Config)?;
     let identity = resolve_identity(&args);
     let basepath = Path::new(&args.out_dir);
 
     // Generate root CA key and certificate (Steps 1 & 2)
-    let ca_key = generate_private_key(&key_cfg)?;
-    let ca_cert = create_root_ca_certificate(&args, &key_cfg, &ca_key)?;
+    let ca_key = generate_private_key(&key_cfg).during("generate the root CA key")?;
+    let ca_cert = create_root_ca_certificate(&args, &key_cfg, &ca_key)
+        .during("build the root CA certificate")?;
 
     // Generate server key and CSR (Steps 3 & 4)
-    let server_key = generate_private_key(&key_cfg)?;
-    let server_csr = generate_web_server_csr(&args, &identity, &key_cfg, &server_key)?;
+    let server_key = generate_private_key(&key_cfg).during("generate the server key")?;
+    let server_csr = generate_web_server_csr(&args, &identity, &key_cfg, &server_key)
+        .during("build the server certificate request")?;
 
     // Sign the server CSR with the root CA (Step 5)
-    let server_cert = sign_server_csr(&args, &identity, &key_cfg, &server_csr, &ca_cert, &ca_key)?;
+    let server_cert = sign_server_csr(&args, &identity, &key_cfg, &server_csr, &ca_cert, &ca_key)
+        .during("sign the server certificate")?;
 
     let mut outputs: Vec<FileOutput> = Vec::new();
 
@@ -737,7 +889,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut outputs,
         basepath,
         &args.ca_key_out,
-        &ca_key.private_key_to_pem_pkcs8()?,
+        "root CA private key",
+        &ca_key
+            .private_key_to_pem_pkcs8()
+            .during("encode the root CA key")?,
         true,
     );
 
@@ -746,7 +901,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut outputs,
         basepath,
         &args.ca_cert_out,
-        &ca_cert.to_pem()?,
+        "root CA certificate",
+        &ca_cert.to_pem().during("encode the root CA certificate")?,
         false,
     );
 
@@ -755,7 +911,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut outputs,
         basepath,
         &args.key_out,
-        &server_key.private_key_to_pem_pkcs8()?,
+        "server private key",
+        &server_key
+            .private_key_to_pem_pkcs8()
+            .during("encode the server key")?,
         true,
     );
 
@@ -765,7 +924,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut outputs,
             basepath,
             csr_out,
-            &server_csr.to_pem()?,
+            "server cert signing request",
+            &server_csr
+                .to_pem()
+                .during("encode the certificate request")?,
             false,
         );
     }
@@ -775,15 +937,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut outputs,
         basepath,
         &args.cert_out,
-        &server_cert.to_pem()?,
+        "server certificate",
+        &server_cert
+            .to_pem()
+            .during("encode the server certificate")?,
         false,
     );
 
     if let Some(out_zip) = &args.out_zip {
-        write_outputs_zip(out_zip, &outputs)?;
+        write_outputs_zip(out_zip, &outputs, args.force)?;
     } else {
-        write_outputs(&outputs)?;
+        write_outputs(&outputs, args.force)?;
+    }
+
+    if !args.quiet {
+        print_summary(
+            &outputs,
+            &key_cfg,
+            &identity,
+            &ca_cert,
+            &server_cert,
+            basepath,
+            args.out_zip.as_deref(),
+        );
     }
 
     Ok(())
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("self-signed-cert: error: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }

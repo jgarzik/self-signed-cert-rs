@@ -1649,3 +1649,163 @@ fn test_signature_algorithm_matches_key() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5: output summary, --force, error reporting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_summary_on_stdout() {
+    let (_temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.trim().is_empty(),
+        "A successful run should say what it produced"
+    );
+
+    for expected in [
+        "ca-cert.pem",
+        "ca-key.pem",
+        "server-cert.pem",
+        "server-key.pem",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "Summary should name {expected}, got: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("P-256"),
+        "Summary should report the key algorithm, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("localhost"),
+        "Summary should report the names the certificate covers, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_quiet_suppresses_summary() {
+    let (temp_dir, output) = run_cert_generator(&["--quiet"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.stdout.is_empty(),
+        "--quiet should print nothing, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        temp_dir.path().join("server-cert.pem").exists(),
+        "--quiet should still write the files"
+    );
+}
+
+#[test]
+fn test_rerun_fails_without_force() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
+    let first = run_in_dir(temp_dir.path(), &[]);
+    assert!(first.status.success(), "First run should succeed");
+
+    let second = run_in_dir(temp_dir.path(), &[]);
+    assert!(
+        !second.status.success(),
+        "Second run must not silently clobber existing output"
+    );
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("ca-key.pem"),
+        "Error should name the file that already exists, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--force"),
+        "Error should point at --force, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Os {") && !stderr.contains("kind:"),
+        "Error should be a sentence, not a Debug dump, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_force_overwrites() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let cert = temp_dir.path().join("server-cert.pem");
+
+    let first = run_in_dir(temp_dir.path(), &[]);
+    assert!(first.status.success(), "First run should succeed");
+    let before = std::fs::read(&cert).expect("Failed to read first certificate");
+
+    let second = run_in_dir(temp_dir.path(), &["--force"]);
+    assert!(
+        second.status.success(),
+        "--force should overwrite: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let after = std::fs::read(&cert).expect("Failed to read second certificate");
+    assert_ne!(
+        before, after,
+        "--force should have replaced the certificate"
+    );
+
+    // Overwriting must not loosen the permissions
+    #[cfg(unix)]
+    {
+        assert_eq!(file_mode(&cert), 0o444);
+        assert_eq!(file_mode(&temp_dir.path().join("server-key.pem")), 0o400);
+    }
+
+    assert!(verify_cert_chain(
+        &temp_dir.path().join("ca-cert.pem"),
+        &cert
+    ));
+}
+
+#[test]
+fn test_force_overwrites_zip() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+    let zip_arg = zip_path.to_str().unwrap();
+
+    assert!(
+        run_in_dir(temp_dir.path(), &["--out-zip", zip_arg])
+            .status
+            .success()
+    );
+    assert!(
+        !run_in_dir(temp_dir.path(), &["--out-zip", zip_arg])
+            .status
+            .success(),
+        "Existing archive must not be clobbered without --force"
+    );
+    assert!(
+        run_in_dir(temp_dir.path(), &["--out-zip", zip_arg, "--force"])
+            .status
+            .success(),
+        "--force should replace the archive"
+    );
+}
+
+#[test]
+fn test_bad_key_alg_error_is_readable() {
+    let (_temp_dir, output) = run_cert_generator(&["--key-alg", "nonsense"]);
+    assert!(!output.status.success(), "An unknown algorithm should fail");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ecdsa-p256"),
+        "Error should list the valid algorithms, got: {stderr}"
+    );
+}
