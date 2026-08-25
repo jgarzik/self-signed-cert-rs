@@ -68,6 +68,199 @@ fn verify_cert_chain(ca_path: &std::path::Path, cert_path: &std::path::Path) -> 
     output.status.success()
 }
 
+/// Run the binary against an existing directory.
+///
+/// `run_cert_generator` always creates a fresh `TempDir`, which makes output
+/// collisions (and therefore `--force`) impossible to exercise.
+fn run_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let mut cmd_args = vec!["-o", dir.to_str().unwrap()];
+    cmd_args.extend(args);
+
+    Command::new(env!("CARGO_BIN_EXE_self-signed-cert"))
+        .args(&cmd_args)
+        .output()
+        .expect("Failed to execute binary")
+}
+
+/// Dump a private key as text, independent of its algorithm.
+///
+/// `openssl rsa` only understands RSA keys; `openssl pkey` handles every
+/// algorithm the tool can emit.
+fn get_key_text(key_path: &std::path::Path) -> String {
+    let output = Command::new(openssl_bin())
+        .args(["pkey", "-in", key_path.to_str().unwrap(), "-noout", "-text"])
+        .output()
+        .expect("Failed to run openssl pkey command");
+
+    assert!(
+        output.status.success(),
+        "openssl pkey failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// Dump a CSR as text, verifying its self-signature along the way
+fn get_csr_text(csr_path: &std::path::Path) -> String {
+    let output = Command::new(openssl_bin())
+        .args([
+            "req",
+            "-in",
+            csr_path.to_str().unwrap(),
+            "-noout",
+            "-text",
+            "-verify",
+        ])
+        .output()
+        .expect("Failed to run openssl req command");
+
+    assert!(
+        output.status.success(),
+        "openssl req failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // -verify writes its verdict to stderr on some builds, stdout on others
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text
+}
+
+/// Verify a certificate chain *and* that the leaf matches a DNS name.
+///
+/// Plain `openssl verify` ignores subject identity entirely, which is why a
+/// certificate carrying the wrong SAN type still passes it.
+fn verify_hostname(ca_path: &std::path::Path, cert_path: &std::path::Path, name: &str) -> bool {
+    Command::new(openssl_bin())
+        .args([
+            "verify",
+            "-CAfile",
+            ca_path.to_str().unwrap(),
+            "-verify_hostname",
+            name,
+            cert_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run openssl verify command")
+        .status
+        .success()
+}
+
+/// Verify a certificate chain *and* that the leaf matches an IP address
+fn verify_ip(ca_path: &std::path::Path, cert_path: &std::path::Path, ip: &str) -> bool {
+    Command::new(openssl_bin())
+        .args([
+            "verify",
+            "-CAfile",
+            ca_path.to_str().unwrap(),
+            "-verify_ip",
+            ip,
+            cert_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run openssl verify command")
+        .status
+        .success()
+}
+
+/// True if the certificate is still valid `days` from now.
+///
+/// Wraps `openssl x509 -checkend`, which exits 0 when the certificate will
+/// *not* have expired by then.
+fn valid_in_days(cert_path: &std::path::Path, days: u64) -> bool {
+    Command::new(openssl_bin())
+        .args([
+            "x509",
+            "-in",
+            cert_path.to_str().unwrap(),
+            "-noout",
+            "-checkend",
+            &(days * 86400).to_string(),
+        ])
+        .output()
+        .expect("Failed to run openssl x509 -checkend")
+        .status
+        .success()
+}
+
+/// A sortable (year, month, day, hour, min, sec) tuple
+type DateTuple = (i32, u32, u32, u32, u32, u32);
+
+/// Parse an openssl date such as `Aug 25 04:39:25 2027 GMT`.
+///
+/// Hand-rolled rather than pulling in a date crate: openssl always prints
+/// this in GMT, so a plain tuple compares correctly.
+fn parse_openssl_date(value: &str) -> DateTuple {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let fields: Vec<&str> = value.split_whitespace().collect();
+    assert!(
+        fields.len() >= 4,
+        "Unrecognized openssl date format: {value}"
+    );
+
+    let month = u32::try_from(
+        MONTHS
+            .iter()
+            .position(|m| *m == fields[0])
+            .unwrap_or_else(|| panic!("Unrecognized month in openssl date: {value}")),
+    )
+    .expect("Month index always fits in u32")
+        + 1;
+    let day: u32 = fields[1].parse().expect("Bad day in openssl date");
+    let time: Vec<u32> = fields[2]
+        .split(':')
+        .map(|f| f.parse().expect("Bad time in openssl date"))
+        .collect();
+    let year: i32 = fields[3].parse().expect("Bad year in openssl date");
+
+    (year, month, day, time[0], time[1], time[2])
+}
+
+/// Read `notBefore` / `notAfter` from a certificate
+fn cert_date(cert_path: &std::path::Path, which: &str) -> DateTuple {
+    let output = Command::new(openssl_bin())
+        .args(["x509", "-in", cert_path.to_str().unwrap(), "-noout", which])
+        .output()
+        .expect("Failed to run openssl x509 date command");
+
+    assert!(
+        output.status.success(),
+        "openssl x509 {which} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = text
+        .trim()
+        .split_once('=')
+        .unwrap_or_else(|| panic!("Unexpected openssl output: {text}"))
+        .1;
+    parse_openssl_date(value)
+}
+
+fn not_before(cert_path: &std::path::Path) -> DateTuple {
+    cert_date(cert_path, "-startdate")
+}
+
+fn not_after(cert_path: &std::path::Path) -> DateTuple {
+    cert_date(cert_path, "-enddate")
+}
+
+/// Permission bits of a file, Unix only
+#[cfg(unix)]
+fn file_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .expect("Failed to stat file")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
 // ============================================================================
 // Integration Tests
 // ============================================================================
@@ -276,41 +469,40 @@ fn test_keys_are_valid_pem() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify CA key is valid
-    let ca_key_check = Command::new(openssl_bin())
-        .args([
-            "rsa",
-            "-in",
-            temp_dir.path().join("ca-key.pem").to_str().unwrap(),
-            "-check",
-            "-noout",
-        ])
-        .output()
-        .expect("Failed to run openssl rsa command");
+    // `openssl pkey` rather than `openssl rsa`: the key algorithm is
+    // configurable, so this must not assume RSA.
+    for key in ["ca-key.pem", "server-key.pem"] {
+        let key_path = temp_dir.path().join(key);
 
-    assert!(
-        ca_key_check.status.success(),
-        "CA key should be valid RSA key: {}",
-        String::from_utf8_lossy(&ca_key_check.stderr)
-    );
+        let check = Command::new(openssl_bin())
+            .args([
+                "pkey",
+                "-in",
+                key_path.to_str().unwrap(),
+                "-check",
+                "-noout",
+            ])
+            .output()
+            .expect("Failed to run openssl pkey command");
 
-    // Verify server key is valid
-    let server_key_check = Command::new(openssl_bin())
-        .args([
-            "rsa",
-            "-in",
-            temp_dir.path().join("server-key.pem").to_str().unwrap(),
-            "-check",
-            "-noout",
-        ])
-        .output()
-        .expect("Failed to run openssl rsa command");
+        assert!(
+            check.status.success(),
+            "{key} should be a structurally valid private key: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
 
-    assert!(
-        server_key_check.status.success(),
-        "Server key should be valid RSA key: {}",
-        String::from_utf8_lossy(&server_key_check.stderr)
-    );
+        // PKCS#8, unencrypted
+        let pem = std::fs::read_to_string(&key_path).expect("Failed to read key");
+        assert!(
+            pem.contains("-----BEGIN PRIVATE KEY-----"),
+            "{key} should be an unencrypted PKCS#8 PEM"
+        );
+
+        assert!(
+            !get_key_text(&key_path).is_empty(),
+            "{key} should dump as text"
+        );
+    }
 }
 
 #[test]
@@ -525,4 +717,215 @@ fn test_zip_entry_names_are_bare() {
         ],
         "Unexpected zip entry names"
     );
+}
+
+#[test]
+fn test_openssl_version_guard() {
+    // Every assertion in this suite is delegated to the openssl CLI.  If it is
+    // missing or ancient, fail with a message that says so rather than letting
+    // downstream tests report confusing mismatches.
+    let output = Command::new(openssl_bin())
+        .arg("version")
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "Cannot run `{}`: {e}.  Set OPENSSL_BIN to a usable OpenSSL 3.x binary.",
+                openssl_bin()
+            )
+        });
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        version.starts_with("OpenSSL 3") || version.starts_with("OpenSSL 4"),
+        "Tests require OpenSSL 3.x or newer (LibreSSL is not sufficient); \
+         found {version:?}.  Set OPENSSL_BIN to override."
+    );
+}
+
+#[test]
+fn test_verify_hostname_rejects_unlisted() {
+    // Negative control: proves verify_hostname() actually discriminates, so
+    // the positive hostname/IP assertions elsewhere mean something.
+    let (temp_dir, output) = run_cert_generator(&["--srv-common-name", "example.test"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca = temp_dir.path().join("ca-cert.pem");
+    let cert = temp_dir.path().join("server-cert.pem");
+
+    assert!(
+        !verify_hostname(&ca, &cert, "evil.example"),
+        "A name absent from the SAN must not verify"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_file_modes() {
+    let (temp_dir, output) = run_cert_generator(&["--csr-out", "server-csr.pem"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for key in ["ca-key.pem", "server-key.pem"] {
+        assert_eq!(
+            file_mode(&temp_dir.path().join(key)),
+            0o400,
+            "Private key {key} should be mode 0400"
+        );
+    }
+
+    for pub_file in ["ca-cert.pem", "server-cert.pem", "server-csr.pem"] {
+        assert_eq!(
+            file_mode(&temp_dir.path().join(pub_file)),
+            0o444,
+            "Public file {pub_file} should be mode 0444"
+        );
+    }
+}
+
+#[test]
+fn test_empty_filename_suppresses_output() {
+    // An empty output path suppresses that artifact entirely.
+    let (temp_dir, output) = run_cert_generator(&["--cert-out", "", "--ca-key-out", ""]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !temp_dir.path().join("server-cert.pem").exists(),
+        "--cert-out \"\" should suppress the server certificate"
+    );
+    assert!(
+        !temp_dir.path().join("ca-key.pem").exists(),
+        "--ca-key-out \"\" should suppress the CA key"
+    );
+    assert!(
+        temp_dir.path().join("ca-cert.pem").exists(),
+        "Unsuppressed outputs should still be written"
+    );
+    assert!(
+        temp_dir.path().join("server-key.pem").exists(),
+        "Unsuppressed outputs should still be written"
+    );
+}
+
+#[test]
+fn test_zip_permissions() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+
+    let output = run_in_dir(temp_dir.path(), &["--out-zip", zip_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for (name, mode, _) in read_zip(&zip_path) {
+        let expected = if name.ends_with("-key.pem") {
+            0o400
+        } else {
+            0o444
+        };
+        assert_eq!(mode, expected, "Wrong unix mode on zip entry {name}");
+    }
+}
+
+#[test]
+fn test_zip_contents_verify() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+
+    let output = run_in_dir(temp_dir.path(), &["--out-zip", zip_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Extract and prove the archived pair is a working chain, not just bytes
+    let extract_dir = TempDir::new().expect("Failed to create temp directory");
+    for (name, _, data) in read_zip(&zip_path) {
+        std::fs::write(extract_dir.path().join(&name), &data)
+            .unwrap_or_else(|e| panic!("Failed to write extracted {name}: {e}"));
+    }
+
+    assert!(
+        verify_cert_chain(
+            &extract_dir.path().join("ca-cert.pem"),
+            &extract_dir.path().join("server-cert.pem"),
+        ),
+        "Certificates extracted from the zip should verify as a chain"
+    );
+}
+
+#[test]
+fn test_verify_ip_rejects_unlisted() {
+    // Negative control for verify_ip(), mirroring test_verify_hostname_rejects_unlisted.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !verify_ip(
+            &temp_dir.path().join("ca-cert.pem"),
+            &temp_dir.path().join("server-cert.pem"),
+            "10.99.99.99",
+        ),
+        "An address absent from the SAN must not verify"
+    );
+}
+
+#[test]
+fn test_csr_is_well_formed() {
+    let (temp_dir, output) = run_cert_generator(&["--csr-out", "server-csr.pem"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // get_csr_text() runs -verify, so reaching here proves the self-signature
+    let text = get_csr_text(&temp_dir.path().join("server-csr.pem"));
+    assert!(
+        text.contains("Certificate Request:"),
+        "CSR should dump as a certificate request, got: {text}"
+    );
+    assert!(
+        text.contains("Subject:"),
+        "CSR should carry a subject, got: {text}"
+    );
+}
+
+#[test]
+fn test_validity_window_is_sane() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for cert in ["ca-cert.pem", "server-cert.pem"] {
+        let path = temp_dir.path().join(cert);
+        assert!(
+            not_before(&path) < not_after(&path),
+            "{cert}: notBefore must precede notAfter"
+        );
+        assert!(
+            valid_in_days(&path, 1),
+            "{cert} should still be valid tomorrow"
+        );
+    }
 }
