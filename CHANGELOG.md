@@ -33,6 +33,30 @@ certificate covering a single (unmatchable) `DNS:127.0.0.1`.
   lost all identity. It now requests the subject alternative names.
 - A non-UTF-8 output path caused a panic.
 
+The following were found by a code review of this work before release:
+
+- **Colliding output names were never checked**, and with `--force` the
+  collision was silent and destructive: `--cert-out ca-cert.pem --force` left
+  `ca-cert.pem` holding the *server* certificate while the summary reported the
+  CA's had been written there. In zip mode the same collision produced a
+  truncated archive. The output set is now validated before anything is
+  created.
+- **Distinguished-name fields were unvalidated**, so ordinary input died with a
+  raw ASN.1 error naming no flag — `--country USA`, `--org` over 64 characters,
+  `--state` over 128, `--san ""`. Each is now rejected with a sentence naming
+  the flag and the RFC 5280 limit.
+- **An over-long derived common name aborted the run.** Deriving the subject CN
+  from `--san` (new in this release) hit the 64-character bound on any ordinary
+  long hostname. The CN is now omitted in that case, with a note: RFC 9525
+  clients match on the SAN, which still carries the name. An explicitly
+  requested over-long common name is still an error.
+- **The `--out-zip` archive was created world-readable** while containing
+  unencrypted private keys, making the per-entry `0400` cosmetic. The archive is
+  now `0400` whenever it holds a key.
+- **`--expire N` warned that the server certificate outlived the CA** when both
+  carried an identical `notAfter`. Both validity windows now derive from a
+  single clock read, and the comparison is strict.
+
 ### Added
 
 - `--key-alg` accepting `ecdsa-p256`, `ecdsa-p384`, `ed25519` or `rsa`.
