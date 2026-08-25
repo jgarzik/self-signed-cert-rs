@@ -17,10 +17,12 @@ use openssl::{
     hash::MessageDigest,
     pkey::{PKey, Private},
     rsa::Rsa,
-    x509::{X509, X509Builder, X509NameBuilder, X509Req, X509ReqBuilder},
+    stack::Stack,
+    x509::{X509, X509Builder, X509Extension, X509NameBuilder, X509Req, X509ReqBuilder},
 };
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -107,9 +109,19 @@ struct Args {
     #[arg(long, default_value_t = 2048, value_parser = parse_rsa_bits)]
     rsa_bits: u32,
 
-    /// Server cert: common name
-    #[arg(long, default_value = "127.0.0.1")]
-    srv_common_name: String,
+    /// Subject alternative name for the server cert; repeatable.
+    ///
+    /// IP addresses and DNS names are told apart automatically.
+    /// [default: `localhost`, `127.0.0.1`, `::1`]
+    #[arg(long)]
+    san: Vec<String>,
+
+    /// Server cert: common name [default: localhost]
+    ///
+    /// Modern TLS clients match on the subject alternative name, not this
+    /// field; it is copied into the SAN so that it still has an effect.
+    #[arg(long)]
+    srv_common_name: Option<String>,
 
     /// Server cert: country code
     #[arg(long, default_value = "US")]
@@ -131,9 +143,9 @@ struct Args {
     #[arg(long, default_value_t = 397)]
     srv_expire: u32,
 
-    /// CA cert: common name
-    #[arg(long, default_value = "127.0.0.1")]
-    ca_common_name: String,
+    /// CA cert: common name [default: self-signed-cert local CA]
+    #[arg(long)]
+    ca_common_name: Option<String>,
 
     /// CA cert: country code
     #[arg(long, default_value = "US")]
@@ -192,8 +204,8 @@ struct FileOutput {
 /// Process CLI args that assign two settings simultaneously
 fn swizzle_args(args: &mut Args) {
     if let Some(txt) = &args.common_name {
-        args.ca_common_name = txt.clone();
-        args.srv_common_name = txt.clone();
+        args.ca_common_name = Some(txt.clone());
+        args.srv_common_name = Some(txt.clone());
     }
     if let Some(txt) = &args.org {
         args.ca_org = Some(txt.clone());
@@ -215,6 +227,88 @@ fn swizzle_args(args: &mut Args) {
         args.ca_expire = *val;
         args.srv_expire = *val;
     }
+}
+
+/// Default CA common name.  Not a host name: the CA never identifies a service.
+const DEFAULT_CA_COMMON_NAME: &str = "self-signed-cert local CA";
+
+/// One subject alternative name, already classified
+enum SanEntry {
+    Dns(String),
+    Ip(IpAddr),
+}
+
+impl SanEntry {
+    /// Classify a user-supplied name.  Anything that parses as an address is
+    /// an iPAddress; everything else is a dNSName.
+    fn parse(value: &str) -> Self {
+        match value.parse::<IpAddr>() {
+            Ok(ip) => SanEntry::Ip(ip),
+            Err(_) => SanEntry::Dns(String::from(value)),
+        }
+    }
+
+    /// The form the value takes in the certificate
+    fn as_text(&self) -> String {
+        match self {
+            SanEntry::Dns(name) => name.clone(),
+            SanEntry::Ip(ip) => ip.to_string(),
+        }
+    }
+}
+
+/// The names the server certificate will attest to
+struct Identity {
+    common_name: String,
+    sans: Vec<SanEntry>,
+}
+
+/// Work out the server certificate's identity from the CLI arguments.
+///
+/// With nothing specified, cover every way a test client reaches a local
+/// server: by name, over IPv4, and over IPv6.
+fn resolve_identity(args: &Args) -> Identity {
+    let mut sans: Vec<SanEntry> = args.san.iter().map(|s| SanEntry::parse(s)).collect();
+
+    if sans.is_empty() && args.srv_common_name.is_none() {
+        return Identity {
+            common_name: String::from("localhost"),
+            sans: vec![
+                SanEntry::Dns(String::from("localhost")),
+                SanEntry::Ip(IpAddr::from([127, 0, 0, 1])),
+                SanEntry::Ip(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1])),
+            ],
+        };
+    }
+
+    // RFC 9525: the common name is not matched by clients, so whatever the
+    // user asked for there must also appear among the SANs to have an effect.
+    let common_name = match &args.srv_common_name {
+        Some(name) => {
+            if !sans.iter().any(|e| e.as_text() == *name) {
+                sans.push(SanEntry::parse(name));
+            }
+            name.clone()
+        }
+        None => sans[0].as_text(),
+    };
+
+    Identity { common_name, sans }
+}
+
+/// Build the subjectAltName extension for a set of names
+fn build_san_extension(
+    sans: &[SanEntry],
+    ctx: &openssl::x509::X509v3Context<'_>,
+) -> Result<X509Extension, ErrorStack> {
+    let mut ext = openssl::x509::extension::SubjectAlternativeName::new();
+    for entry in sans {
+        match entry {
+            SanEntry::Dns(name) => ext.dns(name),
+            SanEntry::Ip(ip) => ext.ip(&ip.to_string()),
+        };
+    }
+    ext.build(ctx)
 }
 
 /// Warn about validity periods that produce certificates clients will reject
@@ -257,7 +351,12 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     if let Some(txt) = args.ca_org.clone() {
         name_builder.append_entry_by_text("O", &txt)?;
     }
-    name_builder.append_entry_by_text("CN", &args.ca_common_name)?;
+    name_builder.append_entry_by_text(
+        "CN",
+        args.ca_common_name
+            .as_deref()
+            .unwrap_or(DEFAULT_CA_COMMON_NAME),
+    )?;
     let name = name_builder.build();
 
     // Build base certificate settings
@@ -317,7 +416,11 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
 }
 
 /// Generate TLS server cert signing request
-fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+fn generate_web_server_csr(
+    args: &Args,
+    identity: &Identity,
+    server_key: &PKey<Private>,
+) -> Result<X509Req, ErrorStack> {
     // Create a new certificate signing request (CSR) builder.
     let mut req_builder = X509ReqBuilder::new()?;
     req_builder.set_pubkey(server_key)?;
@@ -334,10 +437,19 @@ fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X5
     if let Some(txt) = args.srv_org.clone() {
         name_builder.append_entry_by_text("O", &txt)?;
     }
-    name_builder.append_entry_by_text("CN", &args.srv_common_name)?;
+    name_builder.append_entry_by_text("CN", &identity.common_name)?;
     let name = name_builder.build();
 
     req_builder.set_subject_name(&name)?;
+
+    // Request the subject alternative names.  Without this the CSR carries no
+    // identity at all, making it useless to anyone re-signing it elsewhere.
+    let mut extensions: Stack<X509Extension> = Stack::new()?;
+    extensions.push(build_san_extension(
+        &identity.sans,
+        &req_builder.x509v3_context(None),
+    )?)?;
+    req_builder.add_extensions(&extensions)?;
 
     // Sign the CSR with the server's private key
     req_builder.sign(server_key, MessageDigest::sha256())?;
@@ -350,6 +462,7 @@ fn generate_web_server_csr(args: &Args, server_key: &PKey<Private>) -> Result<X5
 /// Root CA signs TLS server's cert request, creating final server cert
 fn sign_server_csr(
     args: &Args,
+    identity: &Identity,
     server_csr: &X509Req,
     ca_cert: &X509,
     ca_pkey: &PKey<Private>,
@@ -406,11 +519,10 @@ fn sign_server_csr(
     )?;
 
     // Extension: subjectAltName
-    builder.append_extension(
-        openssl::x509::extension::SubjectAlternativeName::new()
-            .dns(&args.srv_common_name)
-            .build(&builder.x509v3_context(Some(ca_cert), None))?,
-    )?;
+    builder.append_extension(build_san_extension(
+        &identity.sans,
+        &builder.x509v3_context(Some(ca_cert), None),
+    )?)?;
 
     // Extension: subjectKeyIdentifier
     builder.append_extension(
@@ -513,6 +625,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
     swizzle_args(&mut args);
     warn_about_validity(&args);
+    let identity = resolve_identity(&args);
     let basepath = Path::new(&args.out_dir);
 
     // Generate root CA key and certificate (Steps 1 & 2)
@@ -521,10 +634,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate server key and CSR (Steps 3 & 4)
     let server_key = generate_rsa_private_key(args.rsa_bits)?;
-    let server_csr = generate_web_server_csr(&args, &server_key)?;
+    let server_csr = generate_web_server_csr(&args, &identity, &server_key)?;
 
     // Sign the server CSR with the root CA (Step 5)
-    let server_cert = sign_server_csr(&args, &server_csr, &ca_cert, &ca_key)?;
+    let server_cert = sign_server_csr(&args, &identity, &server_csr, &ca_cert, &ca_key)?;
 
     let mut outputs: Vec<FileOutput> = Vec::new();
 

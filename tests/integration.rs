@@ -1247,3 +1247,222 @@ fn test_warns_leaf_outlives_ca() {
         "Should warn that the leaf outlives the CA, got: {stderr:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3: subject alternative names (RFC 9525 -- identity lives in the SAN)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_verify_ip_127() {
+    // An IP literal must appear as an iPAddress SAN.  Placed in a dNSName it
+    // is ignored by every strict TLS client, even though plain
+    // `openssl verify` still reports the chain as OK.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        verify_ip(
+            &temp_dir.path().join("ca-cert.pem"),
+            &temp_dir.path().join("server-cert.pem"),
+            "127.0.0.1",
+        ),
+        "Default certificate must verify for 127.0.0.1"
+    );
+}
+
+#[test]
+fn test_verify_ip_v6() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        verify_ip(
+            &temp_dir.path().join("ca-cert.pem"),
+            &temp_dir.path().join("server-cert.pem"),
+            "::1",
+        ),
+        "Default certificate must verify for the IPv6 loopback"
+    );
+}
+
+#[test]
+fn test_verify_hostname_localhost() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        verify_hostname(
+            &temp_dir.path().join("ca-cert.pem"),
+            &temp_dir.path().join("server-cert.pem"),
+            "localhost",
+        ),
+        "Default certificate must verify for localhost"
+    );
+}
+
+#[test]
+fn test_default_san_set() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = get_cert_text(&temp_dir.path().join("server-cert.pem"));
+    let san = extension_value(&text, "Subject Alternative Name");
+
+    assert!(
+        san.contains("DNS:localhost"),
+        "Default SAN should include DNS:localhost, got {san:?}"
+    );
+    assert!(
+        san.contains("IP Address:127.0.0.1"),
+        "Default SAN should include IP Address:127.0.0.1, got {san:?}"
+    );
+    assert!(
+        san.contains("IP Address:0:0:0:0:0:0:0:1"),
+        "Default SAN should include the IPv6 loopback, got {san:?}"
+    );
+    assert!(
+        !san.contains("DNS:127.0.0.1"),
+        "An IP literal must never be emitted as a dNSName, got {san:?}"
+    );
+}
+
+#[test]
+fn test_san_flag_multiple() {
+    let (temp_dir, output) = run_cert_generator(&[
+        "--san",
+        "example.test",
+        "--san",
+        "10.0.0.1",
+        "--san",
+        "fd00::1",
+    ]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca = temp_dir.path().join("ca-cert.pem");
+    let cert = temp_dir.path().join("server-cert.pem");
+    let san = extension_value(&get_cert_text(&cert), "Subject Alternative Name");
+
+    assert!(
+        san.contains("DNS:example.test"),
+        "A hostname should become a dNSName, got {san:?}"
+    );
+    assert!(
+        san.contains("IP Address:10.0.0.1"),
+        "An IPv4 literal should become an iPAddress, got {san:?}"
+    );
+    assert!(
+        !san.contains("DNS:10.0.0.1") && !san.contains("DNS:fd00::1"),
+        "IP literals must not be emitted as dNSNames, got {san:?}"
+    );
+
+    assert!(verify_hostname(&ca, &cert, "example.test"));
+    assert!(verify_ip(&ca, &cert, "10.0.0.1"));
+    assert!(verify_ip(&ca, &cert, "fd00::1"));
+
+    // Explicit --san replaces the defaults rather than extending them
+    assert!(
+        !verify_hostname(&ca, &cert, "localhost"),
+        "Explicit --san should replace the default identity set"
+    );
+}
+
+#[test]
+fn test_custom_common_name_appears_in_san() {
+    // RFC 9525: clients match on the SAN, so a common name the user asked for
+    // is useless unless it is also present there.
+    let (temp_dir, output) = run_cert_generator(&["--srv-common-name", "myhost.test"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca = temp_dir.path().join("ca-cert.pem");
+    let cert = temp_dir.path().join("server-cert.pem");
+
+    assert!(
+        extension_value(&get_cert_text(&cert), "Subject Alternative Name")
+            .contains("DNS:myhost.test"),
+        "--srv-common-name should be reflected in the SAN"
+    );
+    assert!(
+        verify_hostname(&ca, &cert, "myhost.test"),
+        "--srv-common-name should verify as a hostname"
+    );
+}
+
+#[test]
+fn test_common_name_ip_becomes_ip_san() {
+    // The historical default was an IP literal in the common name; that must
+    // now produce an iPAddress SAN, not a dNSName.
+    let (temp_dir, output) = run_cert_generator(&["--srv-common-name", "192.168.1.10"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let san = extension_value(
+        &get_cert_text(&temp_dir.path().join("server-cert.pem")),
+        "Subject Alternative Name",
+    );
+    assert!(
+        san.contains("IP Address:192.168.1.10"),
+        "An IP common name should become an iPAddress SAN, got {san:?}"
+    );
+    assert!(
+        !san.contains("DNS:192.168.1.10"),
+        "An IP common name must not become a dNSName, got {san:?}"
+    );
+    assert!(
+        verify_ip(
+            &temp_dir.path().join("ca-cert.pem"),
+            &temp_dir.path().join("server-cert.pem"),
+            "192.168.1.10",
+        ),
+        "An IP common name should verify as an address"
+    );
+}
+
+#[test]
+fn test_csr_has_san() {
+    // The CSR is emitted for users who want to re-sign elsewhere.  Without
+    // an extension request it carries no identity at all.
+    let (temp_dir, output) =
+        run_cert_generator(&["--csr-out", "server-csr.pem", "--san", "csr.test"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = get_csr_text(&temp_dir.path().join("server-csr.pem"));
+    assert!(
+        text.contains("Requested Extensions:"),
+        "CSR should carry an extension request, got: {text}"
+    );
+    assert!(
+        text.contains("DNS:csr.test"),
+        "CSR should request the subject alternative name, got: {text}"
+    );
+}
