@@ -226,7 +226,7 @@ Options:
           IP addresses and DNS names are told apart automatically. Defaults to localhost plus the IPv4 and IPv6 loopback addresses.
 
       --srv-common-name <SRV_COMMON_NAME>
-          Server cert: common name [default: localhost]
+          Server cert: common name, at most 64 characters [default: localhost]
           
           Modern TLS clients match on the subject alternative name, not this field; it is copied into the SAN so that it still has an effect.
 
@@ -250,7 +250,7 @@ Options:
           [default: 397]
 
       --ca-common-name <CA_COMMON_NAME>
-          CA cert: common name [default: self-signed-cert local CA]
+          CA cert: common name, at most 64 characters [default: self-signed-cert local CA]
 
       --ca-country <CA_COUNTRY>
           CA cert: country code

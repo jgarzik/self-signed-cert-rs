@@ -239,7 +239,7 @@ struct Args {
     #[arg(long)]
     san: Vec<String>,
 
-    /// Server cert: common name [default: localhost]
+    /// Server cert: common name, at most 64 characters [default: localhost]
     ///
     /// Modern TLS clients match on the subject alternative name, not this
     /// field; it is copied into the SAN so that it still has an effect.
@@ -266,7 +266,8 @@ struct Args {
     #[arg(long, default_value_t = 397)]
     srv_expire: u32,
 
-    /// CA cert: common name [default: self-signed-cert local CA]
+    /// CA cert: common name, at most 64 characters
+    /// [default: self-signed-cert local CA]
     #[arg(long)]
     ca_common_name: Option<String>,
 
@@ -360,6 +361,70 @@ fn swizzle_args(args: &mut Args) {
     }
 }
 
+/// Upper bounds on the distinguished-name attributes this tool emits, from
+/// RFC 5280 Appendix A.  OpenSSL enforces them inside `append_entry_by_text`,
+/// but only as a raw ASN.1 error naming no flag, so check them up front.
+const UB_COUNTRY: usize = 2;
+const UB_COMMON_NAME: usize = 64;
+const UB_ORGANIZATION_NAME: usize = 64;
+const UB_STATE_NAME: usize = 128;
+const UB_LOCALITY_NAME: usize = 128;
+
+/// Reject a distinguished-name value that OpenSSL would refuse to encode
+fn check_dn_field(flag: &str, value: &str, max: usize) -> Result<(), AppError> {
+    if value.is_empty() {
+        return Err(AppError::Config(format!("{flag} must not be empty")));
+    }
+
+    let len = value.chars().count();
+    if len > max {
+        return Err(AppError::Config(format!(
+            "{flag} must be at most {max} characters, got {len}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate every user-supplied name.
+///
+/// Deliberately called *before* `swizzle_args`, so an error names the flag the
+/// user actually typed rather than the `--srv-*` / `--ca-*` pair it expands
+/// into.
+fn validate_args(args: &Args) -> Result<(), AppError> {
+    let optional = [
+        ("--common-name", &args.common_name, UB_COMMON_NAME),
+        ("--country", &args.country, UB_COUNTRY),
+        ("--state", &args.state, UB_STATE_NAME),
+        ("--city", &args.city, UB_LOCALITY_NAME),
+        ("--org", &args.org, UB_ORGANIZATION_NAME),
+        ("--srv-common-name", &args.srv_common_name, UB_COMMON_NAME),
+        ("--srv-state", &args.srv_state, UB_STATE_NAME),
+        ("--srv-city", &args.srv_city, UB_LOCALITY_NAME),
+        ("--srv-org", &args.srv_org, UB_ORGANIZATION_NAME),
+        ("--ca-common-name", &args.ca_common_name, UB_COMMON_NAME),
+        ("--ca-state", &args.ca_state, UB_STATE_NAME),
+        ("--ca-city", &args.ca_city, UB_LOCALITY_NAME),
+        ("--ca-org", &args.ca_org, UB_ORGANIZATION_NAME),
+    ];
+    for (flag, value, max) in optional {
+        if let Some(text) = value {
+            check_dn_field(flag, text, max)?;
+        }
+    }
+
+    check_dn_field("--srv-country", &args.srv_country, UB_COUNTRY)?;
+    check_dn_field("--ca-country", &args.ca_country, UB_COUNTRY)?;
+
+    for value in &args.san {
+        if value.is_empty() {
+            return Err(AppError::Config(String::from("--san must not be empty")));
+        }
+    }
+
+    Ok(())
+}
+
 /// Default CA common name.  Not a host name: the CA never identifies a service.
 const DEFAULT_CA_COMMON_NAME: &str = "self-signed-cert local CA";
 
@@ -390,7 +455,8 @@ impl SanEntry {
 
 /// The names the server certificate will attest to
 struct Identity {
-    common_name: String,
+    /// `None` when no name short enough for the common-name bound was available
+    common_name: Option<String>,
     sans: Vec<SanEntry>,
 }
 
@@ -403,7 +469,7 @@ fn resolve_identity(args: &Args) -> Identity {
 
     if sans.is_empty() && args.srv_common_name.is_none() {
         return Identity {
-            common_name: String::from("localhost"),
+            common_name: Some(String::from("localhost")),
             sans: vec![
                 SanEntry::Dns(String::from("localhost")),
                 SanEntry::Ip(IpAddr::from([127, 0, 0, 1])),
@@ -414,14 +480,27 @@ fn resolve_identity(args: &Args) -> Identity {
 
     // RFC 9525: the common name is not matched by clients, so whatever the
     // user asked for there must also appear among the SANs to have an effect.
-    let common_name = match &args.srv_common_name {
-        Some(name) => {
-            if !sans.iter().any(|e| e.as_text() == *name) {
-                sans.push(SanEntry::parse(name));
-            }
-            name.clone()
+    let common_name = if let Some(name) = &args.srv_common_name {
+        // Already length-checked by validate_args
+        if !sans.iter().any(|e| e.as_text() == *name) {
+            sans.push(SanEntry::parse(name));
         }
-        None => sans[0].as_text(),
+        Some(name.clone())
+    } else {
+        // Derived from a SAN, which carries no such bound.  A name too long
+        // for the subject is dropped rather than fatal: RFC 9525 clients match
+        // on the SAN, which still carries it.
+        let derived = sans[0].as_text();
+        if derived.chars().count() > UB_COMMON_NAME {
+            eprintln!(
+                "note: subject common name omitted; {derived:?} exceeds the \
+                 {UB_COMMON_NAME}-character limit, and clients match on the \
+                 subject alternative name regardless"
+            );
+            None
+        } else {
+            Some(derived)
+        }
     };
 
     Identity { common_name, sans }
@@ -620,7 +699,9 @@ fn generate_web_server_csr(
     if let Some(txt) = args.srv_org.clone() {
         name_builder.append_entry_by_text("O", &txt)?;
     }
-    name_builder.append_entry_by_text("CN", &identity.common_name)?;
+    if let Some(common_name) = &identity.common_name {
+        name_builder.append_entry_by_text("CN", common_name)?;
+    }
     let name = name_builder.build();
 
     req_builder.set_subject_name(&name)?;
@@ -883,6 +964,7 @@ fn print_summary(
 fn run() -> Result<(), AppError> {
     // parse command line arguments
     let mut args = Args::parse();
+    validate_args(&args)?;
     swizzle_args(&mut args);
     warn_about_validity(&args);
     let key_cfg = resolve_key_config(&args).map_err(AppError::Config)?;

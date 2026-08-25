@@ -346,6 +346,33 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+/// Read a certificate's subject line
+fn cert_subject(cert_path: &std::path::Path) -> String {
+    let output = Command::new(openssl_bin())
+        .args([
+            "x509",
+            "-in",
+            cert_path.to_str().unwrap(),
+            "-noout",
+            "-subject",
+        ])
+        .output()
+        .expect("Failed to run openssl x509 -subject");
+
+    assert!(
+        output.status.success(),
+        "openssl x509 -subject failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// A string of `n` repeated characters, for exercising length bounds
+fn long_name(n: usize) -> String {
+    "a".repeat(n)
+}
+
 // ============================================================================
 // Integration Tests
 // ============================================================================
@@ -2134,4 +2161,150 @@ fn test_suppressed_names_do_not_collide() {
     assert!(!temp_dir.path().join("server-key.pem").exists());
     assert!(temp_dir.path().join("ca-cert.pem").exists());
     assert!(temp_dir.path().join("server-cert.pem").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9: distinguished-name field validation (RFC 5280 Appendix A bounds)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_long_derived_cn_omitted() {
+    // A common name derived from --san may exceed the 64-character bound.
+    // RFC 9525 clients never look at the CN, so drop it rather than failing:
+    // the SAN still carries the name and the certificate stays usable.
+    let host = format!("{}.example.com", long_name(60));
+    let (temp_dir, output) = run_cert_generator(&["--san", &host]);
+    assert!(
+        output.status.success(),
+        "A long SAN should not fail the run: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cert = temp_dir.path().join("server-cert.pem");
+    let subject = cert_subject(&cert);
+    assert!(
+        !subject.contains("CN"),
+        "Over-long derived common name should be omitted, got: {subject}"
+    );
+    assert!(
+        subject.contains("C = US"),
+        "The rest of the subject should survive, got: {subject}"
+    );
+
+    assert!(
+        verify_hostname(&temp_dir.path().join("ca-cert.pem"), &cert, &host),
+        "The name should still verify via the SAN"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("common name") && stderr.contains("64"),
+        "Should explain why the common name was dropped, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_long_explicit_common_name_rejected() {
+    // Explicitly asking for an impossible common name is a user error.
+    let (_temp_dir, output) = run_cert_generator(&["--srv-common-name", &long_name(65)]);
+    assert!(
+        !output.status.success(),
+        "An over-long CN should be rejected"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--srv-common-name") && stderr.contains("64"),
+        "Error should name the flag and the limit, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("asn1") && !stderr.contains("maxsize"),
+        "Error should be a sentence, not a raw ASN.1 dump, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_long_ca_common_name_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--ca-common-name", &long_name(65)]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--ca-common-name"),
+        "Error should name --ca-common-name"
+    );
+}
+
+#[test]
+fn test_bad_country_rejected() {
+    // Validation runs before swizzle_args, so the error names the flag the
+    // user actually typed rather than the --srv-*/--ca-* it expands into.
+    let (_temp_dir, output) = run_cert_generator(&["--country", "USA"]);
+    assert!(!output.status.success(), "A 3-letter country should fail");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--country"),
+        "Error should name --country, not the flag it swizzles into, got: {stderr}"
+    );
+    assert!(
+        stderr.contains('2'),
+        "Error should state the 2-character limit, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_long_org_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--org", &long_name(65)]);
+    assert!(!output.status.success(), "An over-long org should fail");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--org"));
+}
+
+#[test]
+fn test_long_state_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--state", &long_name(129)]);
+    assert!(!output.status.success(), "An over-long state should fail");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--state"));
+}
+
+#[test]
+fn test_empty_san_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--san", ""]);
+    assert!(!output.status.success(), "An empty SAN should be rejected");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--san"),
+        "Error should name --san, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("minsize"),
+        "Error should be a sentence, not a raw ASN.1 dump, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_cn_length_boundary() {
+    // Exactly at the bound is legal; one over is not.
+    let (temp_dir, output) = run_cert_generator(&["--srv-common-name", &long_name(64)]);
+    assert!(
+        output.status.success(),
+        "A 64-character common name is legal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        cert_subject(&temp_dir.path().join("server-cert.pem")).contains(&long_name(64)),
+        "A 64-character common name should appear in the subject"
+    );
+
+    let (_t2, over) = run_cert_generator(&["--srv-common-name", &long_name(65)]);
+    assert!(!over.status.success(), "65 characters must be rejected");
+}
+
+#[test]
+fn test_country_boundary_accepts_two() {
+    let (_temp_dir, output) = run_cert_generator(&["--country", "FR"]);
+    assert!(
+        output.status.success(),
+        "A 2-letter country code is legal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
