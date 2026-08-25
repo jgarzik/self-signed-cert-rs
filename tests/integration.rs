@@ -1863,3 +1863,177 @@ fn test_readme_help_matches_binary() {
         "README.md help block is out of date; regenerate it from `self-signed-cert --help`"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7: end-to-end TLS handshake
+// ---------------------------------------------------------------------------
+
+/// Grab a port the OS says is free.
+///
+/// Inherently racy, but the window is small and the alternative -- a
+/// hardcoded port -- collides with anything else on the machine.
+fn free_port() -> u16 {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind an ephemeral port");
+    listener
+        .local_addr()
+        .expect("Failed to read bound address")
+        .port()
+}
+
+/// Whether this openssl build offers `s_server`.
+///
+/// Not every packaging does -- some Windows builds ship the library and the
+/// `x509`/`verify` subcommands but no test server.  Where it is missing the
+/// handshake tests announce a skip rather than failing, since the
+/// socket-free `verify -verify_ip` / `-verify_hostname` checks already cover
+/// the same ground.
+fn s_server_available() -> bool {
+    Command::new(openssl_bin())
+        .args(["s_server", "-help"])
+        .output()
+        .is_ok_and(|out| {
+            let text = String::from_utf8_lossy(&out.stderr);
+            !text.contains("Invalid command") && !text.contains("unknown option")
+        })
+}
+
+/// Serve `cert`/`key` with `openssl s_server` and connect with `openssl
+/// s_client`, returning the client's combined output.
+///
+/// This is the only check that exercises a real handshake; everything else
+/// inspects the certificate as a static object.
+fn tls_handshake(dir: &std::path::Path, client_args: &[&str]) -> String {
+    let port = free_port();
+
+    let mut server = Command::new(openssl_bin())
+        .args([
+            "s_server",
+            "-cert",
+            dir.join("server-cert.pem").to_str().unwrap(),
+            "-key",
+            dir.join("server-key.pem").to_str().unwrap(),
+            "-accept",
+            &port.to_string(),
+            "-naccept",
+            "1",
+            "-quiet",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn openssl s_server");
+
+    let mut args = vec![
+        "s_client".to_string(),
+        "-connect".to_string(),
+        format!("127.0.0.1:{port}"),
+        "-CAfile".to_string(),
+        dir.join("ca-cert.pem").to_str().unwrap().to_string(),
+        "-verify_return_error".to_string(),
+    ];
+    args.extend(client_args.iter().map(ToString::to_string));
+
+    // Retry the client rather than probing the port first: s_server is run
+    // with -naccept 1, and a probe connection would consume the one accept
+    // the real client needs.  A refused connection is never accepted, so
+    // retrying costs nothing.
+    let mut combined = String::new();
+    for _ in 0..60 {
+        let client = Command::new(openssl_bin())
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("Failed to run openssl s_client");
+
+        combined = String::from_utf8_lossy(&client.stdout).to_string();
+        combined.push_str(&String::from_utf8_lossy(&client.stderr));
+
+        if !combined.contains("Connection refused") {
+            break;
+        }
+
+        if let Ok(Some(status)) = server.try_wait() {
+            panic!("openssl s_server exited early with {status}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let _ = server.kill();
+    let _ = server.wait();
+
+    combined
+}
+
+#[test]
+fn test_tls_handshake_ecdsa() {
+    if !s_server_available() {
+        eprintln!("skipping: this openssl build has no s_server");
+        return;
+    }
+
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let result = tls_handshake(temp_dir.path(), &["-verify_ip", "127.0.0.1"]);
+    assert!(
+        result.contains("Verify return code: 0 (ok)"),
+        "Default certificate should complete a verified handshake, got: {result}"
+    );
+}
+
+#[test]
+fn test_tls_handshake_hostname() {
+    if !s_server_available() {
+        eprintln!("skipping: this openssl build has no s_server");
+        return;
+    }
+
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(output.status.success());
+
+    let result = tls_handshake(temp_dir.path(), &["-verify_hostname", "localhost"]);
+    assert!(
+        result.contains("Verify return code: 0 (ok)"),
+        "Default certificate should verify as localhost over a real handshake, got: {result}"
+    );
+}
+
+#[test]
+fn test_tls_handshake_rsa() {
+    if !s_server_available() {
+        eprintln!("skipping: this openssl build has no s_server");
+        return;
+    }
+
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "rsa"]);
+    assert!(output.status.success());
+
+    let result = tls_handshake(temp_dir.path(), &["-verify_ip", "127.0.0.1"]);
+    assert!(
+        result.contains("Verify return code: 0 (ok)"),
+        "RSA certificate should complete a verified handshake, got: {result}"
+    );
+}
+
+#[test]
+fn test_tls_handshake_ed25519() {
+    if !s_server_available() {
+        eprintln!("skipping: this openssl build has no s_server");
+        return;
+    }
+
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "ed25519"]);
+    assert!(output.status.success());
+
+    let result = tls_handshake(temp_dir.path(), &["-verify_ip", "127.0.0.1"]);
+    assert!(
+        result.contains("Verify return code: 0 (ok)"),
+        "Ed25519 certificate should complete a verified handshake, got: {result}"
+    );
+}
