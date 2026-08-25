@@ -2037,3 +2037,101 @@ fn test_tls_handshake_ed25519() {
         "Ed25519 certificate should complete a verified handshake, got: {result}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 8: colliding output paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_duplicate_output_names_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--cert-out", "ca-cert.pem"]);
+    assert!(
+        !output.status.success(),
+        "Two outputs resolving to the same file must be rejected"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ca-cert.pem"),
+        "Error should name the colliding file, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("root CA certificate") && stderr.contains("server certificate"),
+        "Error should name both roles that want the file, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_duplicate_output_does_not_corrupt_with_force() {
+    // The regression test.  Previously --force happily unlinked and rewrote,
+    // leaving ca-cert.pem holding the *server* certificate while the summary
+    // reported both files written correctly.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
+    assert!(
+        run_in_dir(temp_dir.path(), &[]).status.success(),
+        "Seeding run should succeed"
+    );
+
+    let ca_path = temp_dir.path().join("ca-cert.pem");
+    let before = std::fs::read(&ca_path).expect("Failed to read seeded CA cert");
+
+    let output = run_in_dir(temp_dir.path(), &["--cert-out", "ca-cert.pem", "--force"]);
+    assert!(
+        !output.status.success(),
+        "A colliding --force run must be rejected, not silently applied"
+    );
+
+    let after = std::fs::read(&ca_path).expect("CA cert should still exist");
+    assert_eq!(
+        before, after,
+        "The rejected run must not have touched the existing CA certificate"
+    );
+    assert!(
+        get_cert_text(&ca_path).contains("self-signed-cert local CA"),
+        "ca-cert.pem must still hold the CA certificate, not the server's"
+    );
+}
+
+#[test]
+fn test_duplicate_output_names_rejected_zip() {
+    // In zip mode the collision previously surfaced as a ZipError partway
+    // through, leaving a truncated archive on disk.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+
+    let output = run_in_dir(
+        temp_dir.path(),
+        &[
+            "--out-zip",
+            zip_path.to_str().unwrap(),
+            "--cert-out",
+            "ca-cert.pem",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "A colliding archive entry must be rejected"
+    );
+    assert!(
+        !zip_path.exists(),
+        "No archive should be created when the output set is invalid"
+    );
+}
+
+#[test]
+fn test_suppressed_names_do_not_collide() {
+    // Two outputs suppressed with "" must not be mistaken for duplicates of
+    // each other -- push_output drops them before they reach the output set.
+    let (temp_dir, output) = run_cert_generator(&["--ca-key-out", "", "--key-out", ""]);
+    assert!(
+        output.status.success(),
+        "Suppressed outputs should not register as a collision: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!temp_dir.path().join("ca-key.pem").exists());
+    assert!(!temp_dir.path().join("server-key.pem").exists());
+    assert!(temp_dir.path().join("ca-cert.pem").exists());
+    assert!(temp_dir.path().join("server-cert.pem").exists());
+}

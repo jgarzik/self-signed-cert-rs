@@ -781,6 +781,27 @@ fn create_file(path: &Path, mode: u32, force: bool) -> Result<std::fs::File, App
     })
 }
 
+/// Reject an output set in which two artifacts would land on the same file.
+///
+/// Every `FileOutput` is joined against the same base path, so equal `name`
+/// means equal `path`; one pass covers both loose and archive output.  This
+/// runs before anything is created, so a rejected set leaves the filesystem
+/// untouched -- previously `--force` would unlink and rewrite, silently
+/// leaving one artifact holding another's bytes.
+fn check_output_collisions(outputs: &[FileOutput]) -> Result<(), AppError> {
+    for (index, output) in outputs.iter().enumerate() {
+        if let Some(earlier) = outputs[..index].iter().find(|o| o.name == output.name) {
+            return Err(AppError::Config(format!(
+                "{} would be written twice: once as the {}, once as the {}; \
+                 give them distinct names",
+                output.name, earlier.label, output.label
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn write_outputs(outputs: &[FileOutput], force: bool) -> Result<(), AppError> {
     for output in outputs {
         let mut file = create_file(&output.path, output.mode(), force)?;
@@ -943,6 +964,8 @@ fn run() -> Result<(), AppError> {
             .during("encode the server certificate")?,
         false,
     );
+
+    check_output_collisions(&outputs)?;
 
     if let Some(out_zip) = &args.out_zip {
         write_outputs_zip(out_zip, &outputs, args.force)?;
