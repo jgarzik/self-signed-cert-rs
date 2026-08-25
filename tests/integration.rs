@@ -1809,3 +1809,57 @@ fn test_bad_key_alg_error_is_readable() {
         "Error should list the valid algorithms, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: documentation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_readme_help_matches_binary() {
+    // The README's help block silently went stale before: --rsa-bits was
+    // added with three dedicated tests and never appeared in the docs.
+    let readme =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .expect("Failed to read README.md");
+
+    let begin = readme
+        .find("<!-- BEGIN HELP -->")
+        .expect("README.md should delimit its help block with <!-- BEGIN HELP -->");
+    let end = readme
+        .find("<!-- END HELP -->")
+        .expect("README.md should delimit its help block with <!-- END HELP -->");
+
+    let documented = readme[begin..end]
+        .trim_start_matches("<!-- BEGIN HELP -->")
+        .trim()
+        .trim_start_matches("```")
+        .trim_end_matches("```");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_self-signed-cert"))
+        .arg("--help")
+        .output()
+        .expect("Failed to execute binary");
+    let actual = String::from_utf8_lossy(&output.stdout);
+
+    // Compare line by line, ignoring trailing whitespace: clap pads some
+    // continuation lines, and editors strip that.
+    let normalize = |text: &str| -> Vec<String> {
+        let mut lines: Vec<String> = text
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .collect();
+        while lines.first().is_some_and(String::is_empty) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    };
+
+    assert_eq!(
+        normalize(documented),
+        normalize(&actual),
+        "README.md help block is out of date; regenerate it from `self-signed-cert --help`"
+    );
+}

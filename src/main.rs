@@ -182,7 +182,7 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     out_dir: String,
 
-    /// If present, send output to a single zipfile `OUT_ZIP`
+    /// Bundle all output into a single zip archive at this path
     #[arg(long)]
     out_zip: Option<String>,
 
@@ -235,7 +235,7 @@ struct Args {
     /// Subject alternative name for the server cert; repeatable.
     ///
     /// IP addresses and DNS names are told apart automatically.
-    /// [default: `localhost`, `127.0.0.1`, `::1`]
+    /// Defaults to localhost plus the IPv4 and IPv6 loopback addresses.
     #[arg(long)]
     san: Vec<String>,
 

@@ -1,6 +1,6 @@
 [package]
 name = "self-signed-cert"
-version = "1.0.3"
+version = "2.0.0"
 authors = ["Jeff Garzik"]
 edition = "2024"
 rust-version = "1.88"
