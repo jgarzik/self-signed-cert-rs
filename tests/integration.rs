@@ -2444,3 +2444,92 @@ fn test_unequal_expiry_still_warns() {
         "A leaf genuinely outliving its CA must still warn"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Output names must be plain file names
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_output_name_with_separator_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--cert-out", "sub/x.pem"]);
+    assert!(
+        !output.status.success(),
+        "An output name containing a path separator should be rejected"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--cert-out"),
+        "Error should name the flag, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--out-dir"),
+        "Error should point at --out-dir as the way to choose a location, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_output_name_parent_escape_rejected() {
+    // Written into an archive verbatim, "../evil.pem" is a zip-slip entry: a
+    // naive extractor drops it outside the target directory.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+
+    let output = run_in_dir(
+        temp_dir.path(),
+        &[
+            "--out-zip",
+            zip_path.to_str().unwrap(),
+            "--cert-out",
+            "../evil.pem",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "An escaping output name should be rejected"
+    );
+    assert!(
+        !zip_path.exists(),
+        "No archive should be produced for an invalid output set"
+    );
+}
+
+#[test]
+fn test_output_name_dotdot_rejected() {
+    let (_temp_dir, output) = run_cert_generator(&["--key-out", ".."]);
+    assert!(!output.status.success(), "'..' is not a valid file name");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--key-out"));
+}
+
+#[test]
+fn test_all_zip_entries_are_plain_names() {
+    // The contract write_outputs_zip documents: entry names carry no path
+    // component at all.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+
+    let output = run_in_dir(
+        temp_dir.path(),
+        &[
+            "--out-zip",
+            zip_path.to_str().unwrap(),
+            "--csr-out",
+            "server-csr.pem",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for (name, _, _) in read_zip(&zip_path) {
+        assert_eq!(
+            std::path::Path::new(&name)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string()),
+            Some(name.clone()),
+            "Zip entry {name:?} should be a plain file name"
+        );
+    }
+}

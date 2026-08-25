@@ -395,6 +395,34 @@ fn check_dn_field(flag: &str, value: &str, max: usize) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Reject an output path that is not a plain file name.
+///
+/// Archive entries are bare names by contract, so a value carrying a path
+/// separator would produce a nested entry -- or, with `..`, one that escapes
+/// the extraction directory (zip-slip).  Loose output belongs under
+/// `--out-dir` for the same reason.  An empty value is the documented way to
+/// suppress an artifact and is left alone.
+fn check_output_name(flag: &str, value: &str) -> Result<(), AppError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    if value.contains('/') || value.contains('\\') {
+        return Err(AppError::Config(format!(
+            "{flag} must be a plain file name without path separators; \
+             use --out-dir to choose where files are written"
+        )));
+    }
+
+    if value == "." || value == ".." {
+        return Err(AppError::Config(format!(
+            "{flag} must be a file name, got {value:?}"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Validate every user-supplied name.
 ///
 /// Deliberately called *before* `swizzle_args`, so an error names the flag the
@@ -429,6 +457,14 @@ fn validate_args(args: &Args) -> Result<(), AppError> {
         if value.is_empty() {
             return Err(AppError::Config(String::from("--san must not be empty")));
         }
+    }
+
+    check_output_name("--ca-key-out", &args.ca_key_out)?;
+    check_output_name("--ca-cert-out", &args.ca_cert_out)?;
+    check_output_name("--key-out", &args.key_out)?;
+    check_output_name("--cert-out", &args.cert_out)?;
+    if let Some(csr_out) = &args.csr_out {
+        check_output_name("--csr-out", csr_out)?;
     }
 
     Ok(())
@@ -837,8 +873,9 @@ fn write_outputs_zip(filename: &str, outputs: &[FileOutput], force: bool) -> Res
         .unix_permissions(MODE_KEY);
 
     for output in outputs {
-        // Archive entries are bare file names; --out-dir applies to loose
-        // files only, and must not leak into the archive as a path prefix.
+        // Archive entries are bare file names: --out-dir does not leak in as a
+        // path prefix, and validate_args has already rejected any --*-out
+        // value carrying a separator or `..`.
         let entry_options = if output.is_key { options_key } else { options };
         zip.start_file(&output.name, entry_options)
             .map_err(|e| AppError::Zip(path.clone(), e))?;
