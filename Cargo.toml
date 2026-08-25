@@ -22,9 +22,16 @@ zip = { version = "8", default-features = false, features = ["deflate", "time"] 
 [profile.release]
 lto = true
 
+# Cargo.toml is the single source of truth for lint levels: CI runs plain
+# `cargo clippy`, so local and CI behave identically rather than CI being
+# quietly stricter via `-D warnings`.
 [lints.rust]
 unsafe_code = "forbid"
+unused = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

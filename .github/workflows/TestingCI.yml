@@ -23,7 +23,9 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
+      # No `-- -D warnings`: lint levels are declared in Cargo.toml's [lints]
+      # tables, so CI enforces exactly the policy the repo states, no more.
+      - run: cargo clippy --all-targets --locked
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
