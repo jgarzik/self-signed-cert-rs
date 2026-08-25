@@ -346,7 +346,12 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Read a certificate's subject line
+/// Read a certificate's subject line, in a version-stable format.
+///
+/// `-nameopt rfc2253` is not cosmetic here: OpenSSL's default subject
+/// rendering differs between releases -- 3.0 prints `C = US`, newer builds
+/// print `C=US` -- so an assertion written against one spelling fails on the
+/// other platform.
 fn cert_subject(cert_path: &std::path::Path) -> String {
     let output = Command::new(openssl_bin())
         .args([
@@ -355,6 +360,8 @@ fn cert_subject(cert_path: &std::path::Path) -> String {
             cert_path.to_str().unwrap(),
             "-noout",
             "-subject",
+            "-nameopt",
+            "rfc2253",
         ])
         .output()
         .expect("Failed to run openssl x509 -subject");
@@ -1869,11 +1876,16 @@ fn test_readme_help_matches_binary() {
     let actual = String::from_utf8_lossy(&output.stdout);
 
     // Compare line by line, ignoring trailing whitespace: clap pads some
-    // continuation lines, and editors strip that.
+    // continuation lines, and editors strip that.  The usage line carries the
+    // executable name, so on Windows it reads "self-signed-cert.exe"; fold that
+    // away rather than keeping a per-platform copy of the block.
     let normalize = |text: &str| -> Vec<String> {
         let mut lines: Vec<String> = text
             .lines()
-            .map(|line| line.trim_end().to_string())
+            .map(|line| {
+                line.trim_end()
+                    .replace("self-signed-cert.exe", "self-signed-cert")
+            })
             .collect();
         while lines.first().is_some_and(String::is_empty) {
             lines.remove(0);
@@ -2183,11 +2195,11 @@ fn test_long_derived_cn_omitted() {
     let cert = temp_dir.path().join("server-cert.pem");
     let subject = cert_subject(&cert);
     assert!(
-        !subject.contains("CN"),
+        !subject.contains("CN="),
         "Over-long derived common name should be omitted, got: {subject}"
     );
     assert!(
-        subject.contains("C = US"),
+        subject.contains("C=US"),
         "The rest of the subject should survive, got: {subject}"
     );
 
