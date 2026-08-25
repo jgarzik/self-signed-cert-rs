@@ -13,23 +13,59 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  linux-ubuntu:
-
+  lint:
+    name: rustfmt + clippy
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --release --verbose
-    - name: Run tests
-      run: cargo test --release --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      # No `-- -D warnings`: lint levels are declared in Cargo.toml's [lints]
+      # tables, so CI enforces exactly the policy the repo states, no more.
+      - run: cargo clippy --all-targets --locked
+
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)" >> $GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # --locked: prove the committed Cargo.lock resolves under the declared MSRV
+      - run: cargo build --locked --verbose
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  linux-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release --locked --verbose
+      - name: Run tests
+        run: cargo test --release --locked --verbose
 
   macos-homebrew:
-
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: sfackler/actions/rustup@master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
       - run: echo "version=$(rustc --version)" >> $GITHUB_OUTPUT
         id: rust-version
       - uses: actions/cache@v4
@@ -38,21 +74,27 @@ jobs:
           key: index-${{ runner.os }}-${{ github.run_number }}
           restore-keys: |
             index-${{ runner.os }}-
-      - run: cargo generate-lockfile
       - uses: actions/cache@v4
         with:
           path: ~/.cargo/registry/cache
           key: registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}
-      - run: cargo fetch
-      - run: cargo build --release --verbose
-      - run: cargo run --release --verbose
+      # NB: no `cargo generate-lockfile` -- that would discard the committed
+      # Cargo.lock and leave the pinned dependency set untested.
+      - run: cargo fetch --locked
+      - name: Use homebrew OpenSSL for test validation (system openssl is LibreSSL)
+        run: echo "OPENSSL_BIN=$(brew --prefix openssl@3)/bin/openssl" >> $GITHUB_ENV
+      - run: cargo build --release --locked --verbose
+      - run: cargo test --release --locked --verbose
+      - name: Smoke test
+        run: cargo run --release --locked -- --out-dir "${{ runner.temp }}"
 
   windows-vcpkg:
-
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: sfackler/actions/rustup@master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
       - run: echo "version=$(rustc --version)" >> $GITHUB_OUTPUT
         id: rust-version
       - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -63,22 +105,33 @@ jobs:
           key: index-${{ runner.os }}-${{ github.run_number }}
           restore-keys: |
             index-${{ runner.os }}-
-      - run: cargo generate-lockfile
       - uses: actions/cache@v4
         with:
           path: ~/.cargo/registry/cache
           key: registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}
-      - run: cargo fetch
+      - run: cargo fetch --locked
       - uses: actions/cache@v4
         with:
           path: target
           key: target-${{ github.job }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}
-      # - run: cargo run -p systest
-      - run: cargo build --release --verbose
-      - run: cargo run --release --verbose
+      - name: Locate an openssl CLI for test validation
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:VCPKG_ROOT\installed\x64-windows-static-md\tools\openssl\openssl.exe",
+            "$env:ProgramFiles\Git\usr\bin\openssl.exe",
+            "C:\Program Files\Git\usr\bin\openssl.exe"
+          )
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) { throw "No openssl CLI found; integration tests cannot validate certificates" }
+          & $found version
+          "OPENSSL_BIN=$found" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: cargo build --release --locked --verbose
+      - run: cargo test --release --locked --verbose
+      - name: Smoke test
+        run: cargo run --release --locked -- --out-dir "${{ runner.temp }}"
       - name: Upload self-signed-cert.exe as an artifact
         uses: actions/upload-artifact@v4
         with:
           name: self-signed-cert-win64-exe
           path: target/release/self-signed-cert.exe
-
