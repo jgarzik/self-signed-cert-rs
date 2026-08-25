@@ -9,12 +9,14 @@
 // SPDX-License-Identifier: MIT
 
 // Import necessary modules and types from the clap and openssl crates.
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use openssl::{
     asn1::{Asn1Integer, Asn1Time},
     bn::{BigNum, MsbOption},
+    ec::{Asn1Flag, EcGroup, EcKey},
     error::ErrorStack,
     hash::MessageDigest,
+    nid::Nid,
     pkey::{PKey, Private},
     rsa::Rsa,
     stack::Stack,
@@ -63,6 +65,34 @@ fn random_serial() -> Result<Asn1Integer, ErrorStack> {
     serial.to_asn1_integer()
 }
 
+/// Key algorithm for both the root CA and the server certificate.
+///
+/// The default follows Mozilla's "Modern" server-side TLS profile, which is
+/// ECDSA P-256/P-384 only.  RSA remains available for older peers and for
+/// compliance regimes that still mandate it; note that no RSA key size offers
+/// any resistance to a quantum adversary, so a larger modulus is not a
+/// post-quantum hedge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum KeyAlg {
+    /// NIST P-256, signed with SHA-256
+    EcdsaP256,
+    /// NIST P-384, signed with SHA-384
+    EcdsaP384,
+    /// Edwards-curve DSA, no separate digest
+    Ed25519,
+    /// RSA at --rsa-bits, signed with SHA-256
+    Rsa,
+}
+
+/// Fully resolved key settings
+struct KeyConfig {
+    alg: KeyAlg,
+    rsa_bits: u32,
+}
+
+/// Default RSA modulus size when `--key-alg rsa` is selected without `--rsa-bits`
+const DEFAULT_RSA_BITS: u32 = 2048;
+
 /// Parse and validate RSA key size
 fn parse_rsa_bits(s: &str) -> Result<u32, String> {
     let bits: u32 = s
@@ -105,9 +135,15 @@ struct Args {
     #[arg(long, default_value = "server-cert.pem")]
     cert_out: String,
 
-    /// RSA key size in bits
-    #[arg(long, default_value_t = 2048, value_parser = parse_rsa_bits)]
-    rsa_bits: u32,
+    /// Key algorithm for both certificates [default: ecdsa-p256]
+    #[arg(long, value_enum)]
+    key_alg: Option<KeyAlg>,
+
+    /// RSA key size in bits: 2048, 3072 or 4096 [default: 2048]
+    ///
+    /// Implies `--key-alg rsa` when given on its own.
+    #[arg(long, value_parser = parse_rsa_bits)]
+    rsa_bits: Option<u32>,
 
     /// Subject alternative name for the server cert; repeatable.
     ///
@@ -330,15 +366,66 @@ fn warn_about_validity(args: &Args) {
     }
 }
 
-/// Generate random RSA private key
-fn generate_rsa_private_key(bits: u32) -> Result<PKey<Private>, ErrorStack> {
-    let rsa = Rsa::generate(bits)?;
-    let pkey = PKey::from_rsa(rsa)?;
-    Ok(pkey)
+/// Resolve the key algorithm and size from the CLI arguments.
+///
+/// `--rsa-bits` on its own selects RSA, so scripts predating `--key-alg`
+/// keep working unchanged.
+fn resolve_key_config(args: &Args) -> Result<KeyConfig, String> {
+    let alg = match (args.key_alg, args.rsa_bits) {
+        (Some(alg), _) => alg,
+        (None, Some(_)) => KeyAlg::Rsa,
+        (None, None) => KeyAlg::EcdsaP256,
+    };
+
+    if args.rsa_bits.is_some() && alg != KeyAlg::Rsa {
+        return Err(String::from(
+            "--rsa-bits applies only to RSA keys; drop it or pass --key-alg rsa",
+        ));
+    }
+
+    Ok(KeyConfig {
+        alg,
+        rsa_bits: args.rsa_bits.unwrap_or(DEFAULT_RSA_BITS),
+    })
+}
+
+/// The digest a certificate signed by this key algorithm should use.
+///
+/// `EdDSA` signs the message directly, so openssl requires a null digest there.
+fn sig_digest(alg: KeyAlg) -> MessageDigest {
+    match alg {
+        KeyAlg::EcdsaP384 => MessageDigest::sha384(),
+        KeyAlg::Ed25519 => MessageDigest::null(),
+        KeyAlg::EcdsaP256 | KeyAlg::Rsa => MessageDigest::sha256(),
+    }
+}
+
+/// Generate a fresh private key
+fn generate_private_key(cfg: &KeyConfig) -> Result<PKey<Private>, ErrorStack> {
+    match cfg.alg {
+        KeyAlg::EcdsaP256 => generate_ec_key(Nid::X9_62_PRIME256V1),
+        KeyAlg::EcdsaP384 => generate_ec_key(Nid::SECP384R1),
+        KeyAlg::Ed25519 => PKey::generate_ed25519(),
+        KeyAlg::Rsa => PKey::from_rsa(Rsa::generate(cfg.rsa_bits)?),
+    }
+}
+
+/// Generate an EC key on a named curve.
+///
+/// The `NAMED_CURVE` flag matters: without it the key is serialized with
+/// explicit curve parameters, which a number of TLS stacks reject.
+fn generate_ec_key(curve: Nid) -> Result<PKey<Private>, ErrorStack> {
+    let mut group = EcGroup::from_curve_name(curve)?;
+    group.set_asn1_flag(Asn1Flag::NAMED_CURVE);
+    PKey::from_ec_key(EcKey::generate(&group)?)
 }
 
 /// Create root CA certificate, given root CA private key
-fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509, ErrorStack> {
+fn create_root_ca_certificate(
+    args: &Args,
+    key_cfg: &KeyConfig,
+    pkey: &PKey<Private>,
+) -> Result<X509, ErrorStack> {
     // Build the subject and issuer names.
     let mut name_builder = X509NameBuilder::new()?;
     name_builder.append_entry_by_text("C", &args.ca_country)?;
@@ -409,7 +496,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     let serial = random_serial()?;
     builder.set_serial_number(&serial)?;
 
-    builder.sign(pkey, MessageDigest::sha256())?;
+    builder.sign(pkey, sig_digest(key_cfg.alg))?;
     let certificate = builder.build();
 
     Ok(certificate)
@@ -419,6 +506,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
 fn generate_web_server_csr(
     args: &Args,
     identity: &Identity,
+    key_cfg: &KeyConfig,
     server_key: &PKey<Private>,
 ) -> Result<X509Req, ErrorStack> {
     // Create a new certificate signing request (CSR) builder.
@@ -452,7 +540,7 @@ fn generate_web_server_csr(
     req_builder.add_extensions(&extensions)?;
 
     // Sign the CSR with the server's private key
-    req_builder.sign(server_key, MessageDigest::sha256())?;
+    req_builder.sign(server_key, sig_digest(key_cfg.alg))?;
 
     // Return the signed CSR
     let csr = req_builder.build();
@@ -463,6 +551,7 @@ fn generate_web_server_csr(
 fn sign_server_csr(
     args: &Args,
     identity: &Identity,
+    key_cfg: &KeyConfig,
     server_csr: &X509Req,
     ca_cert: &X509,
     ca_pkey: &PKey<Private>,
@@ -503,13 +592,14 @@ fn sign_server_csr(
     // certificate carries digitalSignature and/or keyEncipherment.
     // dataEncipherment and nonRepudiation have no role in TLS server
     // authentication.
-    builder.append_extension(
-        openssl::x509::extension::KeyUsage::new()
-            .critical()
-            .digital_signature()
-            .key_encipherment()
-            .build()?,
-    )?;
+    // keyEncipherment only applies to RSA: an EC or Edwards key never
+    // transports a session key.
+    let mut key_usage = openssl::x509::extension::KeyUsage::new();
+    key_usage.critical().digital_signature();
+    if key_cfg.alg == KeyAlg::Rsa {
+        key_usage.key_encipherment();
+    }
+    builder.append_extension(key_usage.build()?)?;
 
     // Extension: extendedKeyUsage (required by modern TLS validators)
     builder.append_extension(
@@ -531,7 +621,7 @@ fn sign_server_csr(
     )?;
 
     // Sign the certificate with the CA's private key
-    builder.sign(ca_pkey, openssl::hash::MessageDigest::sha256())?;
+    builder.sign(ca_pkey, sig_digest(key_cfg.alg))?;
 
     Ok(builder.build())
 }
@@ -625,19 +715,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
     swizzle_args(&mut args);
     warn_about_validity(&args);
+    let key_cfg = resolve_key_config(&args)?;
     let identity = resolve_identity(&args);
     let basepath = Path::new(&args.out_dir);
 
     // Generate root CA key and certificate (Steps 1 & 2)
-    let ca_key = generate_rsa_private_key(args.rsa_bits)?;
-    let ca_cert = create_root_ca_certificate(&args, &ca_key)?;
+    let ca_key = generate_private_key(&key_cfg)?;
+    let ca_cert = create_root_ca_certificate(&args, &key_cfg, &ca_key)?;
 
     // Generate server key and CSR (Steps 3 & 4)
-    let server_key = generate_rsa_private_key(args.rsa_bits)?;
-    let server_csr = generate_web_server_csr(&args, &identity, &server_key)?;
+    let server_key = generate_private_key(&key_cfg)?;
+    let server_csr = generate_web_server_csr(&args, &identity, &key_cfg, &server_key)?;
 
     // Sign the server CSR with the root CA (Step 5)
-    let server_cert = sign_server_csr(&args, &identity, &server_csr, &ca_cert, &ca_key)?;
+    let server_cert = sign_server_csr(&args, &identity, &key_cfg, &server_csr, &ca_cert, &ca_key)?;
 
     let mut outputs: Vec<FileOutput> = Vec::new();
 

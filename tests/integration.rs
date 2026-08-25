@@ -498,35 +498,6 @@ fn test_server_cert_has_subject_alt_name() {
 }
 
 #[test]
-fn test_server_cert_has_key_usage() {
-    let (temp_dir, output) = run_cert_generator(&[]);
-    assert!(
-        output.status.success(),
-        "Binary failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let cert_path = temp_dir.path().join("server-cert.pem");
-    let cert_text = get_cert_text(&cert_path);
-
-    // Check for keyUsage extension marked critical (per RFC 5280)
-    assert!(
-        cert_text.contains("X509v3 Key Usage: critical"),
-        "Server certificate must have critical keyUsage extension.\nCertificate:\n{cert_text}"
-    );
-
-    // Check for expected keyUsage values
-    assert!(
-        cert_text.contains("Digital Signature"),
-        "Server certificate must have Digital Signature in keyUsage.\nCertificate:\n{cert_text}"
-    );
-    assert!(
-        cert_text.contains("Key Encipherment"),
-        "Server certificate must have Key Encipherment in keyUsage.\nCertificate:\n{cert_text}"
-    );
-}
-
-#[test]
 fn test_custom_common_name() {
     let (temp_dir, output) = run_cert_generator(&["--common-name", "example.local"]);
     assert!(
@@ -626,7 +597,7 @@ fn test_csr_output_when_requested() {
 
 #[test]
 fn test_default_rsa_key_size_is_2048() {
-    let (temp_dir, output) = run_cert_generator(&[]);
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "rsa"]);
     assert!(
         output.status.success(),
         "Binary failed: {}",
@@ -655,7 +626,7 @@ fn test_default_rsa_key_size_is_2048() {
 
 #[test]
 fn test_rsa_key_size_3072() {
-    let (temp_dir, output) = run_cert_generator(&["--rsa-bits", "3072"]);
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "rsa", "--rsa-bits", "3072"]);
     assert!(
         output.status.success(),
         "Binary failed: {}",
@@ -684,7 +655,7 @@ fn test_rsa_key_size_3072() {
 
 #[test]
 fn test_rsa_key_size_4096() {
-    let (temp_dir, output) = run_cert_generator(&["--rsa-bits", "4096"]);
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "rsa", "--rsa-bits", "4096"]);
     assert!(
         output.status.success(),
         "Binary failed: {}",
@@ -1065,7 +1036,7 @@ fn test_leaf_key_usage_rsa() {
     // CABF BR 7.1.2.7.11: for an RSA subscriber certificate, keyUsage should
     // be digitalSignature and/or keyEncipherment.  dataEncipherment and
     // nonRepudiation are not appropriate for TLS server authentication.
-    let (temp_dir, output) = run_cert_generator(&[]);
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "rsa"]);
     assert!(
         output.status.success(),
         "Binary failed: {}",
@@ -1465,4 +1436,216 @@ fn test_csr_has_san() {
         text.contains("DNS:csr.test"),
         "CSR should request the subject alternative name, got: {text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: key algorithms
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_default_key_alg_is_ecdsa_p256() {
+    // Mozilla's "Modern" server-side TLS profile is ECDSA P-256/P-384 only.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for key in ["ca-key.pem", "server-key.pem"] {
+        let text = get_key_text(&temp_dir.path().join(key));
+        assert!(
+            text.contains("prime256v1") || text.contains("P-256"),
+            "{key} should be an ECDSA P-256 key, got: {text}"
+        );
+    }
+
+    let cert_text = get_cert_text(&temp_dir.path().join("server-cert.pem"));
+    assert!(
+        cert_text.contains("id-ecPublicKey"),
+        "Default leaf should carry an EC public key, got: {cert_text}"
+    );
+}
+
+#[test]
+fn test_ec_key_uses_named_curve() {
+    // An EC key encoded with explicit curve parameters instead of a named
+    // curve is rejected by a number of TLS stacks.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = get_key_text(&temp_dir.path().join("server-key.pem"));
+    assert!(
+        text.contains("ASN1 OID: prime256v1"),
+        "EC key should name its curve, got: {text}"
+    );
+    assert!(
+        !text.contains("Field Type"),
+        "EC key must not carry explicit curve parameters, got: {text}"
+    );
+}
+
+#[test]
+fn test_key_alg_ecdsa_p384() {
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "ecdsa-p384"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let key_text = get_key_text(&temp_dir.path().join("server-key.pem"));
+    assert!(
+        key_text.contains("secp384r1") || key_text.contains("P-384"),
+        "Should be a P-384 key, got: {key_text}"
+    );
+
+    // A P-384 key deserves a matching digest strength
+    let cert_text = get_cert_text(&temp_dir.path().join("server-cert.pem"));
+    assert!(
+        cert_text.contains("ecdsa-with-SHA384"),
+        "P-384 certificates should be signed with SHA-384, got: {cert_text}"
+    );
+
+    assert!(verify_cert_chain(
+        &temp_dir.path().join("ca-cert.pem"),
+        &temp_dir.path().join("server-cert.pem"),
+    ));
+}
+
+#[test]
+fn test_key_alg_ed25519() {
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "ed25519"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let key_text = get_key_text(&temp_dir.path().join("server-key.pem"));
+    assert!(
+        key_text.to_uppercase().contains("ED25519"),
+        "Should be an Ed25519 key, got: {key_text}"
+    );
+
+    // Proves the null-digest signing path: EdDSA has no separate hash step
+    assert!(
+        verify_cert_chain(
+            &temp_dir.path().join("ca-cert.pem"),
+            &temp_dir.path().join("server-cert.pem"),
+        ),
+        "Ed25519 chain should verify"
+    );
+    assert!(verify_hostname(
+        &temp_dir.path().join("ca-cert.pem"),
+        &temp_dir.path().join("server-cert.pem"),
+        "localhost",
+    ));
+}
+
+#[test]
+fn test_key_alg_rsa_still_supported() {
+    let (temp_dir, output) = run_cert_generator(&["--key-alg", "rsa"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let key_text = get_key_text(&temp_dir.path().join("server-key.pem"));
+    assert!(
+        key_text.contains("2048 bit") || key_text.contains("2048)"),
+        "--key-alg rsa should default to 2048 bits, got: {key_text}"
+    );
+    assert!(
+        get_cert_text(&temp_dir.path().join("server-cert.pem")).contains("sha256WithRSAEncryption"),
+        "RSA certificates should be signed with SHA-256"
+    );
+}
+
+#[test]
+fn test_rsa_bits_implies_rsa_alg() {
+    // Back-compat: scripts that only ever passed --rsa-bits keep working.
+    let (temp_dir, output) = run_cert_generator(&["--rsa-bits", "3072"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let key_text = get_key_text(&temp_dir.path().join("server-key.pem"));
+    assert!(
+        key_text.contains("3072"),
+        "--rsa-bits alone should select RSA at that size, got: {key_text}"
+    );
+}
+
+#[test]
+fn test_rsa_bits_with_ecdsa_rejected() {
+    let (_temp_dir, output) =
+        run_cert_generator(&["--key-alg", "ecdsa-p256", "--rsa-bits", "4096"]);
+    assert!(
+        !output.status.success(),
+        "Combining --rsa-bits with a non-RSA --key-alg should fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--rsa-bits") && stderr.contains("--key-alg"),
+        "Error should name both flags, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_leaf_key_usage_ecdsa() {
+    // CABF BR 7.1.2.7.11: an ECDSA subscriber certificate uses
+    // digitalSignature.  keyEncipherment is meaningless for an EC key.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let usage = extension_value(
+        &get_cert_text(&temp_dir.path().join("server-cert.pem")),
+        "Key Usage",
+    );
+    assert!(
+        usage.contains("Digital Signature"),
+        "ECDSA leaf should assert Digital Signature, got {usage:?}"
+    );
+    assert!(
+        !usage.contains("Key Encipherment"),
+        "ECDSA leaf must not assert Key Encipherment, got {usage:?}"
+    );
+}
+
+#[test]
+fn test_signature_algorithm_matches_key() {
+    for (alg, expected) in [
+        ("ecdsa-p256", "ecdsa-with-SHA256"),
+        ("ecdsa-p384", "ecdsa-with-SHA384"),
+        ("ed25519", "ED25519"),
+        ("rsa", "sha256WithRSAEncryption"),
+    ] {
+        let (temp_dir, output) = run_cert_generator(&["--key-alg", alg]);
+        assert!(
+            output.status.success(),
+            "Binary failed for {alg}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for cert in ["ca-cert.pem", "server-cert.pem"] {
+            let text = get_cert_text(&temp_dir.path().join(cert));
+            assert!(
+                text.contains(expected),
+                "{alg}: {cert} should be signed with {expected}, got: {text}"
+            );
+        }
+    }
 }
