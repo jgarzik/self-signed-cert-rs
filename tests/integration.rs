@@ -2373,3 +2373,62 @@ fn test_zip_archive_mode_without_keys() {
         "An archive with no private keys need not be restricted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11: validity windows derived from a single clock read
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_expire_flag_emits_no_warning() {
+    // --expire sets both certificates by design, so warning that one outlives
+    // the other on that very flag is nonsense.
+    let (_temp_dir, output) = run_cert_generator(&["--expire", "100"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("outlives"),
+        "--expire sets both certs equal; it must not warn, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_equal_expiry_yields_identical_notafter() {
+    // Previously each certificate read the clock independently, so "equal"
+    // day counts were only approximately equal instants.
+    let (temp_dir, output) = run_cert_generator(&["--expire", "100"]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca = temp_dir.path().join("ca-cert.pem");
+    let leaf = temp_dir.path().join("server-cert.pem");
+
+    assert_eq!(
+        not_after(&ca),
+        not_after(&leaf),
+        "Equal validity in days should give byte-identical notAfter"
+    );
+    assert_eq!(
+        not_before(&ca),
+        not_before(&leaf),
+        "Both certificates should share one notBefore"
+    );
+}
+
+#[test]
+fn test_unequal_expiry_still_warns() {
+    // The real case must keep warning.
+    let (_temp_dir, output) = run_cert_generator(&["--srv-expire", "700", "--ca-expire", "365"]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("outlives"),
+        "A leaf genuinely outliving its CA must still warn"
+    );
+}

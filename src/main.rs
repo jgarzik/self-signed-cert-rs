@@ -102,16 +102,25 @@ const CLOCK_SKEW_SECS: i64 = 3600;
 /// root.  Warn rather than fail: the tool is used for more than browser tests.
 const MAX_LEAF_DAYS: u32 = 825;
 
-/// `notBefore`, backdated by `CLOCK_SKEW_SECS`.
-///
-/// `Asn1Time::days_from_now` cannot express a time in the past, so go through
-/// the Unix epoch instead.
-fn not_before_time() -> Result<Asn1Time, ErrorStack> {
+/// Seconds since the Unix epoch
+fn unix_now() -> i64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("System clock is before the Unix epoch");
-    let now = i64::try_from(now.as_secs()).expect("System clock beyond the range of time_t");
-    Asn1Time::from_unix(now - CLOCK_SKEW_SECS)
+    i64::try_from(now.as_secs()).expect("System clock beyond the range of time_t")
+}
+
+/// The validity window for a certificate, as (`notBefore`, `notAfter`).
+///
+/// Both bounds come from a single `base` timestamp read once per run, so two
+/// certificates asked for the same number of days get byte-identical times
+/// rather than whatever two independent clock reads happened to produce.
+/// `Asn1Time::days_from_now` cannot express a time in the past, so the
+/// backdated `notBefore` goes through the Unix epoch instead.
+fn validity_window(base: i64, days: u32) -> Result<(Asn1Time, Asn1Time), ErrorStack> {
+    let not_before = Asn1Time::from_unix(base - CLOCK_SKEW_SECS)?;
+    let not_after = Asn1Time::from_unix(base + i64::from(days) * 86_400)?;
+    Ok((not_before, not_after))
 }
 
 /// A fresh 128-bit random serial number.
@@ -531,7 +540,9 @@ fn warn_about_validity(args: &Args) {
             args.srv_expire
         );
     }
-    if args.srv_expire >= args.ca_expire {
+    // Strictly greater: equal day counts now yield an identical notAfter, so
+    // the leaf does not outlive the CA -- and is useless past that point anyway.
+    if args.srv_expire > args.ca_expire {
         eprintln!(
             "warning: server cert ({} days) outlives the CA ({} days); \
              the chain will stop verifying when the CA expires",
@@ -598,6 +609,7 @@ fn generate_ec_key(curve: Nid) -> Result<PKey<Private>, ErrorStack> {
 fn create_root_ca_certificate(
     args: &Args,
     key_cfg: &KeyConfig,
+    base_time: i64,
     pkey: &PKey<Private>,
 ) -> Result<X509, ErrorStack> {
     // Build the subject and issuer names.
@@ -628,8 +640,7 @@ fn create_root_ca_certificate(
     builder.set_pubkey(pkey)?;
 
     // Set validity times for the certificate.
-    let not_before = not_before_time()?;
-    let not_after = Asn1Time::days_from_now(args.ca_expire)?;
+    let (not_before, not_after) = validity_window(base_time, args.ca_expire)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
@@ -728,6 +739,7 @@ fn sign_server_csr(
     args: &Args,
     identity: &Identity,
     key_cfg: &KeyConfig,
+    base_time: i64,
     server_csr: &X509Req,
     ca_cert: &X509,
     ca_pkey: &PKey<Private>,
@@ -745,9 +757,8 @@ fn sign_server_csr(
     let serial = random_serial()?;
     builder.set_serial_number(&serial)?;
 
-    // Set validity
-    let not_before = not_before_time()?;
-    let not_after = openssl::asn1::Asn1Time::days_from_now(args.srv_expire)?;
+    // Set validity, from the same base instant as the CA
+    let (not_before, not_after) = validity_window(base_time, args.srv_expire)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
@@ -980,9 +991,12 @@ fn run() -> Result<(), AppError> {
     let identity = resolve_identity(&args);
     let basepath = Path::new(&args.out_dir);
 
+    // One clock read for the whole run, shared by both certificates
+    let base_time = unix_now();
+
     // Generate root CA key and certificate (Steps 1 & 2)
     let ca_key = generate_private_key(&key_cfg).during("generate the root CA key")?;
-    let ca_cert = create_root_ca_certificate(&args, &key_cfg, &ca_key)
+    let ca_cert = create_root_ca_certificate(&args, &key_cfg, base_time, &ca_key)
         .during("build the root CA certificate")?;
 
     // Generate server key and CSR (Steps 3 & 4)
@@ -991,8 +1005,16 @@ fn run() -> Result<(), AppError> {
         .during("build the server certificate request")?;
 
     // Sign the server CSR with the root CA (Step 5)
-    let server_cert = sign_server_csr(&args, &identity, &key_cfg, &server_csr, &ca_cert, &ca_key)
-        .during("sign the server certificate")?;
+    let server_cert = sign_server_csr(
+        &args,
+        &identity,
+        &key_cfg,
+        base_time,
+        &server_csr,
+        &ca_cert,
+        &ca_key,
+    )
+    .during("sign the server certificate")?;
 
     let mut outputs: Vec<FileOutput> = Vec::new();
 
