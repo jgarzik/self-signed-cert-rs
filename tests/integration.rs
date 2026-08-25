@@ -2308,3 +2308,68 @@ fn test_country_boundary_accepts_two() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 10: archive permissions
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn test_zip_archive_mode_is_restrictive() {
+    // The archive holds unencrypted PKCS#8 private keys.  Protecting them
+    // per-entry is cosmetic if anyone on the host can read the archive and
+    // extract them; the loose-file path guards the same bytes at 0400.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("bundle.zip");
+
+    let output = run_in_dir(temp_dir.path(), &["--out-zip", zip_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        file_mode(&zip_path),
+        0o400,
+        "An archive containing private keys must not be world-readable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_zip_archive_mode_without_keys() {
+    // With both keys suppressed the archive holds only public material, so
+    // the restrictive mode is unnecessary.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let zip_path = temp_dir.path().join("public.zip");
+
+    let output = run_in_dir(
+        temp_dir.path(),
+        &[
+            "--out-zip",
+            zip_path.to_str().unwrap(),
+            "--ca-key-out",
+            "",
+            "--key-out",
+            "",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        read_zip(&zip_path)
+            .iter()
+            .all(|(name, _, _)| !name.ends_with("-key.pem")),
+        "Sanity check: this archive should hold no keys"
+    );
+    assert_eq!(
+        file_mode(&zip_path),
+        0o444,
+        "An archive with no private keys need not be restricted"
+    );
+}

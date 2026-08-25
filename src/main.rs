@@ -804,7 +804,16 @@ fn sign_server_csr(
 
 fn write_outputs_zip(filename: &str, outputs: &[FileOutput], force: bool) -> Result<(), AppError> {
     let path = PathBuf::from(filename);
-    let file = create_file(&path, MODE_NORMAL, force)?;
+
+    // Restricting each entry is cosmetic if the archive itself is readable:
+    // extracting it hands over the private keys.  Guard the container to match
+    // the strictest thing inside it.
+    let archive_mode = if outputs.iter().any(|o| o.is_key) {
+        MODE_KEY
+    } else {
+        MODE_NORMAL
+    };
+    let file = create_file(&path, archive_mode, force)?;
     let mut zip = zip::ZipWriter::new(file);
 
     let options = zip::write::SimpleFileOptions::default()
