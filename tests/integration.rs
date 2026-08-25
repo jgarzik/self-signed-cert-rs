@@ -261,6 +261,91 @@ fn file_mode(path: &std::path::Path) -> u32 {
         & 0o777
 }
 
+/// Read a certificate's serial number as an uppercase hex string
+fn cert_serial(cert_path: &std::path::Path) -> String {
+    let output = Command::new(openssl_bin())
+        .args([
+            "x509",
+            "-in",
+            cert_path.to_str().unwrap(),
+            "-noout",
+            "-serial",
+        ])
+        .output()
+        .expect("Failed to run openssl x509 -serial");
+
+    assert!(
+        output.status.success(),
+        "openssl x509 -serial failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split_once('=')
+        .expect("Unexpected openssl -serial output")
+        .1
+        .to_string()
+}
+
+/// Pull the indented body of a named X.509 extension out of `openssl x509 -text`
+fn extension_value(cert_text: &str, ext_name: &str) -> String {
+    let needle = format!("X509v3 {ext_name}:");
+    let hit = cert_text
+        .find(&needle)
+        .unwrap_or_else(|| panic!("Extension {ext_name:?} not present in certificate"));
+
+    // Rewind to the start of the line so the header's indentation is visible;
+    // slicing at the match would report an indent of zero and swallow every
+    // following extension.
+    let start = cert_text[..hit].rfind('\n').map_or(0, |nl| nl + 1);
+
+    let mut lines = cert_text[start..].lines();
+    let header = lines.next().unwrap_or_default();
+    let header_indent = header.len() - header.trim_start().len();
+
+    let mut body = String::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= header_indent {
+            break;
+        }
+        body.push_str(line.trim());
+        body.push(' ');
+    }
+    body.trim().to_string()
+}
+
+/// Run `openssl verify` as though the clock read `unix_time`
+fn verify_at_time(
+    ca_path: &std::path::Path,
+    cert_path: &std::path::Path,
+    unix_time: u64,
+) -> std::process::Output {
+    Command::new(openssl_bin())
+        .args([
+            "verify",
+            "-CAfile",
+            ca_path.to_str().unwrap(),
+            "-attime",
+            &unix_time.to_string(),
+            cert_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run openssl verify -attime")
+}
+
+/// Seconds since the Unix epoch
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("System clock before the Unix epoch")
+        .as_secs()
+}
+
 // ============================================================================
 // Integration Tests
 // ============================================================================
@@ -928,4 +1013,237 @@ fn test_validity_window_is_sane() {
             "{cert} should still be valid tomorrow"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: RFC 5280 / CA-Browser-Forum conformance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_leaf_serial_nonzero() {
+    // RFC 5280 4.1.2.2: the serial number MUST be a positive integer.
+    // CABF BR 7.1: at least 64 bits of CSPRNG output.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let serial = cert_serial(&temp_dir.path().join("server-cert.pem"));
+
+    assert!(
+        serial.trim_start_matches('0').chars().next().is_some(),
+        "Leaf serial must be a positive integer, got {serial:?}"
+    );
+    assert!(
+        serial.len() >= 16,
+        "Leaf serial must carry at least 64 bits of entropy \
+         (>= 16 hex digits), got {serial:?} ({} digits)",
+        serial.len()
+    );
+}
+
+#[test]
+fn test_ca_and_leaf_serials_differ() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_ne!(
+        cert_serial(&temp_dir.path().join("ca-cert.pem")),
+        cert_serial(&temp_dir.path().join("server-cert.pem")),
+        "CA and leaf must not share a serial number"
+    );
+}
+
+#[test]
+fn test_leaf_key_usage_rsa() {
+    // CABF BR 7.1.2.7.11: for an RSA subscriber certificate, keyUsage should
+    // be digitalSignature and/or keyEncipherment.  dataEncipherment and
+    // nonRepudiation are not appropriate for TLS server authentication.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = get_cert_text(&temp_dir.path().join("server-cert.pem"));
+    let usage = extension_value(&text, "Key Usage");
+
+    assert!(
+        text.contains("X509v3 Key Usage: critical"),
+        "Leaf keyUsage must be critical"
+    );
+    assert!(
+        usage.contains("Digital Signature"),
+        "Leaf keyUsage must include Digital Signature, got {usage:?}"
+    );
+    assert!(
+        usage.contains("Key Encipherment"),
+        "RSA leaf keyUsage must include Key Encipherment, got {usage:?}"
+    );
+    assert!(
+        !usage.contains("Non Repudiation"),
+        "Leaf keyUsage must not include Non Repudiation, got {usage:?}"
+    );
+    assert!(
+        !usage.contains("Data Encipherment"),
+        "Leaf keyUsage must not include Data Encipherment, got {usage:?}"
+    );
+}
+
+#[test]
+fn test_ca_pathlen_zero() {
+    // The CA issues exactly one leaf; it must not be able to mint intermediates.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = get_cert_text(&temp_dir.path().join("ca-cert.pem"));
+    let bc = extension_value(&text, "Basic Constraints");
+
+    assert!(
+        bc.contains("CA:TRUE"),
+        "CA basicConstraints must assert CA:TRUE, got {bc:?}"
+    );
+    assert!(
+        bc.contains("pathlen:0"),
+        "CA basicConstraints must set pathlen:0, got {bc:?}"
+    );
+}
+
+#[test]
+fn test_leaf_aki_matches_ca_ski() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca_text = get_cert_text(&temp_dir.path().join("ca-cert.pem"));
+    let leaf_text = get_cert_text(&temp_dir.path().join("server-cert.pem"));
+
+    let ca_ski = extension_value(&ca_text, "Subject Key Identifier");
+    let leaf_aki = extension_value(&leaf_text, "Authority Key Identifier");
+
+    assert!(!ca_ski.is_empty(), "CA must carry a subjectKeyIdentifier");
+    assert!(
+        leaf_aki.contains(&ca_ski),
+        "Leaf authorityKeyIdentifier {leaf_aki:?} must name the CA's subjectKeyIdentifier {ca_ski:?}"
+    );
+}
+
+#[test]
+fn test_ca_outlives_leaf() {
+    // A CA that expires with its leaf breaks the chain the moment it matters.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca_expiry = not_after(&temp_dir.path().join("ca-cert.pem"));
+    let leaf_expiry = not_after(&temp_dir.path().join("server-cert.pem"));
+
+    assert!(
+        ca_expiry > leaf_expiry,
+        "CA must outlive the leaf: CA {ca_expiry:?} vs leaf {leaf_expiry:?}"
+    );
+}
+
+#[test]
+fn test_default_validity_days() {
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let leaf = temp_dir.path().join("server-cert.pem");
+    let ca = temp_dir.path().join("ca-cert.pem");
+
+    // Leaf: 397 days -- comfortably under Apple's 825-day ceiling for
+    // privately-rooted server certificates.
+    assert!(
+        valid_in_days(&leaf, 396),
+        "Leaf should be valid at 396 days"
+    );
+    assert!(
+        !valid_in_days(&leaf, 398),
+        "Leaf should have expired by 398 days"
+    );
+
+    // CA: 10 years
+    assert!(valid_in_days(&ca, 3649), "CA should be valid at 3649 days");
+    assert!(
+        !valid_in_days(&ca, 3651),
+        "CA should have expired by 3651 days"
+    );
+}
+
+#[test]
+fn test_not_before_backdated() {
+    // notBefore is backdated so a client whose clock runs slightly behind the
+    // generating host does not reject a freshly minted certificate.
+    let (temp_dir, output) = run_cert_generator(&[]);
+    assert!(
+        output.status.success(),
+        "Binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ca = temp_dir.path().join("ca-cert.pem");
+    let leaf = temp_dir.path().join("server-cert.pem");
+
+    let half_hour_ago = unix_now() - 1800;
+    let result = verify_at_time(&ca, &leaf, half_hour_ago);
+
+    assert!(
+        result.status.success(),
+        "Certificate should already be valid 30 minutes ago, but verification failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn test_warns_over_825_days() {
+    let (_temp_dir, output) = run_cert_generator(&["--srv-expire", "900", "--ca-expire", "1200"]);
+    assert!(
+        output.status.success(),
+        "An over-long validity should warn, not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("825"),
+        "Should warn that 900 days exceeds the 825-day limit, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn test_warns_leaf_outlives_ca() {
+    let (_temp_dir, output) = run_cert_generator(&["--srv-expire", "700", "--ca-expire", "365"]);
+    assert!(
+        output.status.success(),
+        "A leaf outliving its CA should warn, not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("outlives"),
+        "Should warn that the leaf outlives the CA, got: {stderr:?}"
+    );
 }

@@ -11,7 +11,7 @@
 // Import necessary modules and types from the clap and openssl crates.
 use clap::Parser;
 use openssl::{
-    asn1::Asn1Time,
+    asn1::{Asn1Integer, Asn1Time},
     bn::{BigNum, MsbOption},
     error::ErrorStack,
     hash::MessageDigest,
@@ -22,12 +22,44 @@ use openssl::{
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 const MODE_NORMAL: u32 = 0o444;
 const MODE_KEY: u32 = 0o400;
+
+/// Certificates are backdated by this much so that a client whose clock trails
+/// the generating host still accepts a freshly minted certificate.
+const CLOCK_SKEW_SECS: i64 = 3600;
+
+/// Apple platforms reject a TLS server certificate issued on or after
+/// 2019-07-01 whose validity exceeds 825 days, even under a privately added
+/// root.  Warn rather than fail: the tool is used for more than browser tests.
+const MAX_LEAF_DAYS: u32 = 825;
+
+/// `notBefore`, backdated by `CLOCK_SKEW_SECS`.
+///
+/// `Asn1Time::days_from_now` cannot express a time in the past, so go through
+/// the Unix epoch instead.
+fn not_before_time() -> Result<Asn1Time, ErrorStack> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System clock is before the Unix epoch");
+    let now = i64::try_from(now.as_secs()).expect("System clock beyond the range of time_t");
+    Asn1Time::from_unix(now - CLOCK_SKEW_SECS)
+}
+
+/// A fresh 128-bit random serial number.
+///
+/// RFC 5280 4.1.2.2 requires a positive integer; CA/Browser Forum baseline
+/// requirement 7.1 requires at least 64 bits of CSPRNG output.
+fn random_serial() -> Result<Asn1Integer, ErrorStack> {
+    let mut serial = BigNum::new()?;
+    serial.rand(128, MsbOption::MAYBE_ZERO, false)?;
+    serial.to_asn1_integer()
+}
 
 /// Parse and validate RSA key size
 fn parse_rsa_bits(s: &str) -> Result<u32, String> {
@@ -96,7 +128,7 @@ struct Args {
     srv_org: Option<String>,
 
     /// Server cert: days until expiration
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 397)]
     srv_expire: u32,
 
     /// CA cert: common name
@@ -120,7 +152,7 @@ struct Args {
     ca_org: Option<String>,
 
     /// CA cert: days until expiration
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 3650)]
     ca_expire: u32,
 
     /// common name: Default set for both CA and server certs.
@@ -185,6 +217,25 @@ fn swizzle_args(args: &mut Args) {
     }
 }
 
+/// Warn about validity periods that produce certificates clients will reject
+fn warn_about_validity(args: &Args) {
+    if args.srv_expire > MAX_LEAF_DAYS {
+        eprintln!(
+            "warning: server cert validity of {} days exceeds {MAX_LEAF_DAYS} days; \
+             Apple platforms reject privately-rooted TLS server certificates \
+             beyond that limit",
+            args.srv_expire
+        );
+    }
+    if args.srv_expire >= args.ca_expire {
+        eprintln!(
+            "warning: server cert ({} days) outlives the CA ({} days); \
+             the chain will stop verifying when the CA expires",
+            args.srv_expire, args.ca_expire
+        );
+    }
+}
+
 /// Generate random RSA private key
 fn generate_rsa_private_key(bits: u32) -> Result<PKey<Private>, ErrorStack> {
     let rsa = Rsa::generate(bits)?;
@@ -217,7 +268,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     builder.set_pubkey(pkey)?;
 
     // Set validity times for the certificate.
-    let not_before = Asn1Time::days_from_now(0)?;
+    let not_before = not_before_time()?;
     let not_after = Asn1Time::days_from_now(args.ca_expire)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
@@ -236,10 +287,13 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     )?;
 
     // Extension: basicConstraints
+    // pathlen:0 -- this CA signs end-entity certificates only, never
+    // intermediates.
     builder.append_extension(
         openssl::x509::extension::BasicConstraints::new()
             .critical()
             .ca()
+            .pathlen(0)
             .build()?,
     )?;
 
@@ -253,9 +307,7 @@ fn create_root_ca_certificate(args: &Args, pkey: &PKey<Private>) -> Result<X509,
     )?;
 
     // Generate a serial number for the certificate.
-    let mut serial = BigNum::new()?;
-    serial.rand(128, MsbOption::MAYBE_ZERO, false)?;
-    let serial = serial.to_asn1_integer()?;
+    let serial = random_serial()?;
     builder.set_serial_number(&serial)?;
 
     builder.sign(pkey, MessageDigest::sha256())?;
@@ -310,8 +362,13 @@ fn sign_server_csr(
     let pubkey = server_csr.public_key()?;
     builder.set_pubkey(&*pubkey)?;
 
+    // Every certificate needs its own serial; without this the leaf inherits
+    // the X509Builder default of 0, which RFC 5280 forbids.
+    let serial = random_serial()?;
+    builder.set_serial_number(&serial)?;
+
     // Set validity
-    let not_before = openssl::asn1::Asn1Time::days_from_now(0)?;
+    let not_before = not_before_time()?;
     let not_after = openssl::asn1::Asn1Time::days_from_now(args.srv_expire)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
@@ -319,8 +376,7 @@ fn sign_server_csr(
     // Extension: authorityKeyIdentifier
     builder.append_extension(
         openssl::x509::extension::AuthorityKeyIdentifier::new()
-            .keyid(false)
-            .issuer(false)
+            .keyid(true)
             .build(&builder.x509v3_context(Some(ca_cert), None))?,
     )?;
 
@@ -329,13 +385,16 @@ fn sign_server_csr(
     builder.append_extension(ext_basic)?;
 
     // Extension: keyUsage (marked critical per RFC 5280)
+    //
+    // CA/Browser Forum baseline requirement 7.1.2.7.11: an RSA subscriber
+    // certificate carries digitalSignature and/or keyEncipherment.
+    // dataEncipherment and nonRepudiation have no role in TLS server
+    // authentication.
     builder.append_extension(
         openssl::x509::extension::KeyUsage::new()
             .critical()
-            .non_repudiation()
             .digital_signature()
             .key_encipherment()
-            .data_encipherment()
             .build()?,
     )?;
 
@@ -453,6 +512,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parse command line arguments
     let mut args = Args::parse();
     swizzle_args(&mut args);
+    warn_about_validity(&args);
     let basepath = Path::new(&args.out_dir);
 
     // Generate root CA key and certificate (Steps 1 & 2)
